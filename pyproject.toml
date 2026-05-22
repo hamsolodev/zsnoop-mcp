@@ -1,0 +1,133 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zsnoop-mcp"
+version = "0.1.0"
+description = "MCP server for read-only exploration of ZFS snapshots on remote hosts over SSH"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Mark Hellewell", email = "zsnoop-mcp.happiest328@passmail.net" }]
+keywords = ["mcp", "zfs", "snapshots", "ssh"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Filesystems",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "mcp>=1.0",
+]
+
+[project.scripts]
+zsnoop-mcp = "zsnoop_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://c3po.example.com/youruser/zsnoop-mcp"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zsnoop_mcp"]
+
+# ---------------------------------------------------------------------------
+# Ruff: lint + format. Single source of truth for style.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "agent", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # bugbear
+    "UP",        # pyupgrade
+    "SIM",       # simplify
+    "PL",        # pylint
+    "RUF",       # ruff-specific
+    "S",         # bandit (security)
+    "PTH",       # pathlib over os.path
+    "ASYNC",     # async-correctness
+    "ANN",       # annotations
+    "D",         # pydocstyle
+]
+ignore = [
+    "D100",      # missing docstring in public module
+    "D104",      # missing docstring in public package
+    "D203",      # one-blank-line-before-class (conflicts with D211)
+    "D213",      # multi-line summary second line (conflicts with D212)
+    "PLR0913",   # too-many-arguments (we accept this for tool signatures)
+    "S603",      # subprocess-without-shell-equals-true (we always use argv lists)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "D", "ANN", "PLR2004"]   # asserts + docstrings + annotations + magic values OK in tests
+"agent/**" = ["D"]                              # agent is self-documenting via comments
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# Mypy: strict typing.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+warn_return_any = true
+disallow_any_unimported = true
+files = ["src", "agent", "tests"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=zsnoop_mcp",
+    "--cov=agent",
+    "--cov-report=term-missing",
+]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/zsnoop_mcp", "agent"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
