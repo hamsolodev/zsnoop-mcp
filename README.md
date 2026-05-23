@@ -145,6 +145,10 @@ file-recovery, drift-audit, and forensics workflows.
 
 ## Documentation
 
+- **New here?** Start with the [onboarding tutorial](docs/onboarding/index.md) —
+  a 10-chapter, what/why/how walk through the codebase, ending with a
+  worked example of adding a new tool end-to-end. Renders nicely as HTML
+  via `uv run mkdocs serve` (see `--group docs`).
 - [Installation](docs/INSTALL.md) — local setup, ZFS delegation, sudo mode
 - [Usage examples](docs/USAGE.md) — concrete prompts the tools handle
 - [Security model](docs/SECURITY.md) — threat model, guarantees, sudo tradeoff
