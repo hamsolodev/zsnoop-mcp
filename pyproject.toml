@@ -114,16 +114,17 @@ addopts = [
     "--strict-markers",
     "--strict-config",
     "--cov=zsnoop_mcp",
-    "--cov=agent",
+    "--cov=zfs_snoop_agent",
     "--cov-report=term-missing",
 ]
 testpaths = ["tests"]
+pythonpath = ["agent", "src"]
 asyncio_mode = "auto"
 filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["src/zsnoop_mcp", "agent"]
+source = ["zsnoop_mcp", "zfs_snoop_agent"]
 
 [tool.coverage.report]
 exclude_also = [

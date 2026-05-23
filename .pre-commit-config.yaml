@@ -12,15 +12,20 @@ repos:
         args: [--fix=lf]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.7.4
+    rev: v0.15.14
     hooks:
       - id: ruff
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+  # mypy runs in the project's uv venv so it sees the installed package and
+  # all dev deps. An isolated mypy env (mirrors-mypy) can't find pytest stubs
+  # or the editable zsnoop_mcp install.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies: [mcp>=1.0]
-        args: [--config-file=pyproject.toml]
+        name: mypy (via uv)
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
