@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from zsnoop_mcp.config import ConfigError, load_config
+from zsnoop_mcp.config import Config, ConfigError, load_config
 from zsnoop_mcp.server import create_server, find_agent_source
 from zsnoop_mcp.transport import ConnectionPool
 
@@ -49,8 +49,31 @@ def _build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+_log = logging.getLogger("zsnoop_mcp")
+
+
+def _check_ssh_env(config: Config) -> None:
+    """Warn loudly if SSH_AUTH_SOCK is missing and hosts are configured.
+
+    Common failure mode: an MCP client (Claude Desktop, mcp.client.stdio, …)
+    spawns this server with a stripped env and ssh-agent forwarding silently
+    breaks. With BatchMode=yes, SSH then dies before the agent can produce
+    any output, and the symptom is a mysterious "agent closed stdout".
+    """
+    if not config.hosts:
+        return
+    if not os.environ.get("SSH_AUTH_SOCK"):
+        _log.warning(
+            "SSH_AUTH_SOCK is not set; ssh agent forwarding is unavailable. "
+            "If your MCP client strips env, configure it to pass through "
+            "SSH_AUTH_SOCK (and HOME, PATH) explicitly. Configured hosts: %s",
+            sorted(config.hosts),
+        )
+
+
 async def _amain(args: argparse.Namespace) -> None:
     config = load_config(args.config or _default_config_path())
+    _check_ssh_env(config)
     agent_source = (
         args.agent_source.read_text(encoding="utf-8") if args.agent_source else find_agent_source()
     )

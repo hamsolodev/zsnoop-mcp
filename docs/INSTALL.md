@@ -1,24 +1,40 @@
 # Installation
 
-> 🚧 This document is filled in across phases 1–5. The ZFS delegation and MCP
-> client wiring sections below are authoritative; the deployment commands will
-> be finalised in phase 5.
-
 ## Requirements
 
-- **Local (where the MCP client runs):** Python 3.11+, `uv`, OpenSSH client.
+- **Local (where the MCP client runs):** Python 3.11+, `uv` (or `pip`), OpenSSH client.
 - **Remote (each ZFS host you want to explore):** Python 3.11+, OpenSSH server,
-  SSH key auth (preferably via agent forwarding), the user account you SSH in
-  as must hold or be delegated `diff` permission on the pool(s) you want to
-  query.
+  SSH key authentication (preferably via agent forwarding), and the user account
+  you SSH in as must either hold the delegated `diff` permission on the relevant
+  pools (user mode) or have passwordless `sudo` (sudo mode).
+
+## Install the server locally
+
+### From source
+
+```sh
+git clone git@c3po.example.com:youruser/zsnoop-mcp.git
+cd zsnoop-mcp
+uv sync
+```
+
+Run it with `uv run zsnoop-mcp`.
+
+### From PyPI (when published)
+
+```sh
+uv tool install zsnoop-mcp   # or: pip install zsnoop-mcp
+```
+
+Run it with `zsnoop-mcp`. See [PUBLISHING.md](PUBLISHING.md) for the release flow.
 
 ## Choose a privilege mode (per host)
 
-For each host, decide whether the remote agent runs **as your SSH user**
-(default) or **under `sudo` as root** (opt-in per host).
+For each host you configure, decide whether the remote agent runs **as your SSH
+user** (default) or **under `sudo` as root** (opt-in per host).
 
 | | **User mode** (default) | **Sudo mode** |
-|---|---|---|
+| --- | --- | --- |
 | Privilege | normal user account | root |
 | `zfs diff` works? | only with delegated `diff` permission (below) | yes |
 | Read files in system datasets (`rpool/ROOT/…`)? | only files the user can read | any file |
@@ -26,16 +42,16 @@ For each host, decide whether the remote agent runs **as your SSH user**
 | Trust footprint | minimal | root on the host |
 
 User mode is recommended unless you specifically need to read root-owned files
-from snapshots. The threat model section of [SECURITY.md](SECURITY.md)
-discusses the tradeoff.
+from snapshots. The threat model in [SECURITY.md](SECURITY.md) discusses the
+tradeoff in detail.
 
 ### Passwordless sudo for sudo mode
 
-If you choose sudo mode for a host, the SSH user must be able to run
-`sudo python3 …` (or `sudo /path/to/zfs-snoop-agent`) without a password
+In sudo mode, the SSH user must be able to run `sudo python3 …` (bootstrap mode)
+or `sudo /path/to/zfs-snoop-agent` (preinstalled mode) without a password
 prompt. The recommended mechanism is `pam_ssh_agent_auth` with SSH agent
-forwarding — Claude verifies your forwarded key on the remote host and grants
-`sudo` without prompting.
+forwarding — the remote `sudo` verifies your forwarded key and grants
+elevation without an interactive prompt.
 
 ## ZFS delegated permissions (user mode only)
 
@@ -44,42 +60,33 @@ else `zsnoop-mcp` does — listing snapshots, walking `.zfs/snapshot/` directori
 reading files — uses default-allowed `zfs` subcommands or normal POSIX file
 access governed by the owner of the SSH session.
 
-For each pool you want to be able to diff, on each host, as root:
+For each pool you want to be able to diff, on each host:
 
 ```sh
-sudo zfs allow -u <your-user> diff <pool>
-# example for the canonical layout on a Debian-ZFS-on-root box:
-sudo zfs allow -u mch diff rpool
-sudo zfs allow -u mch diff bpool
+sudo zfs allow -u $USER diff <pool>
+# example: a Debian-on-ZFS box with the canonical layout
+sudo zfs allow -u $USER diff rpool
+sudo zfs allow -u $USER diff bpool
 ```
 
 Verify with:
 
 ```sh
 zfs allow rpool
-zfs allow bpool
 ```
 
 This is **all** that's delegated. No `snapshot`, no `destroy`, no `mount`,
-no `send`. The agent is built to refuse anything outside an explicit allowlist
+no `send`. The agent refuses anything outside its explicit method allowlist
 regardless of permissions held, but minimising delegated rights is defence
 in depth.
 
-### What this *does not* grant
+### What this does *not* grant
 
 - Reading files inside snapshots is still governed by POSIX permissions. If
   you can't read `/etc/shadow` on the live filesystem, you can't read it from
   a snapshot either.
-- The agent never modifies snapshots, pools, or filesystems. The delegated
-  `diff` permission also confers no write capability.
-
-## Local install
-
-```sh
-git clone git@c3po.example.com:youruser/zsnoop-mcp.git
-cd zsnoop-mcp
-uv sync
-```
+- The agent never modifies snapshots, pools, or filesystems. The `diff`
+  delegation confers no write capability.
 
 ## Remote agent deployment
 
@@ -87,13 +94,14 @@ Two modes; pick per host (or mix).
 
 ### Bootstrap-on-connect (zero install on remote)
 
-The local server streams `agent/zfs_snoop_agent.py` over the SSH connection on
-first use. No file is left on the remote. Best for ergonomics during
+The local server streams `agent/zfs_snoop_agent.py` (≈26 KB) over the SSH
+connection on first use. No file is left on the remote. Best ergonomics during
 development — change the agent locally and the next call uses the new version.
 
-This is the default and requires no remote-side setup beyond Python 3.11+.
+This is the default (`agent_mode = "bootstrap"`) and requires no remote-side
+setup beyond Python 3.11+.
 
-### Pre-installed (lower per-connection cost)
+### Pre-installed (slightly lower per-session cost)
 
 ```sh
 # from your local checkout
@@ -101,43 +109,108 @@ scp agent/zfs_snoop_agent.py <host>:~/bin/zfs-snoop-agent
 ssh <host> chmod +x ~/bin/zfs-snoop-agent
 ```
 
-Then set `agent_mode = "preinstalled"` for that host in your config. (Config
-format finalised in phase 4.)
+Then set `agent_mode = "preinstalled"` and `agent_path = "~/bin/zfs-snoop-agent"`
+for that host in your config. Saves ~30 KB of source transfer per session.
 
-## MCP client configuration
+## Host configuration
 
-> Finalised in phase 5.
+The MCP server looks for `hosts.toml` in this order:
 
-The intended shape for Claude Code's `~/.claude/settings.json`:
+1. `$ZSNOOP_CONFIG` (if set)
+2. `$XDG_CONFIG_HOME/zsnoop-mcp/hosts.toml`
+3. `~/.config/zsnoop-mcp/hosts.toml`
+
+A minimal example:
+
+```toml
+[hosts.r2d2]
+ssh_target = "r2d2.example.com"
+agent_mode = "bootstrap"
+sudo       = false
+pools      = ["rpool", "bpool"]
+
+[hosts.c3po]
+ssh_target    = "c3po.example.com"
+agent_mode    = "preinstalled"
+agent_path    = "/home/youruser/bin/zfs-snoop-agent"
+sudo          = true
+remote_python = "python3"
+ssh_options   = ["-o", "ConnectTimeout=5"]
+pools         = ["rpool"]
+```
+
+Per-host fields:
+
+| Field           | Default       | Description                                            |
+| --------------- | ------------- | ------------------------------------------------------ |
+| `ssh_target`    | *(required)*  | What gets passed to `ssh`, e.g. `user@host` or alias.  |
+| `agent_mode`    | `"bootstrap"` | `"bootstrap"` or `"preinstalled"`.                     |
+| `agent_path`    | *(required for preinstalled)* | Absolute path to the agent on the remote.  |
+| `sudo`          | `false`       | Run the agent under `sudo` (needs passwordless setup). |
+| `remote_python` | `"python3"`   | Interpreter to use in bootstrap mode.                  |
+| `ssh_options`   | `[]`          | Extra args inserted between `ssh` defaults and target. |
+| `pools`         | `[]`          | Hint to the LLM about which pools exist; not enforced. |
+
+`pools` is metadata only at this layer; the agent itself queries whichever
+datasets it has permission to see.
+
+## Wire into Claude Code
+
+Add to `~/.claude/settings.json`:
 
 ```jsonc
 {
   "mcpServers": {
     "zsnoop": {
       "command": "uv",
-      "args": ["run", "--directory", "/home/youruser/Documents/worktrees/zsnoop-mcp", "zsnoop-mcp"],
-      "env": {
-        "ZSNOOP_CONFIG": "/home/youruser/.config/zsnoop-mcp/hosts.toml"
-      }
+      "args": ["run", "--directory", "/home/youruser/Documents/worktrees/zsnoop-mcp", "zsnoop-mcp"]
     }
   }
 }
 ```
 
-## Host configuration
+(After `uv tool install zsnoop-mcp` you can just use `"command": "zsnoop-mcp"`
+with no `args`.)
 
-> Finalised in phase 4. Shape will be roughly:
+Restart your Claude Code session; the tools appear under the `zsnoop` namespace.
 
-```toml
-# ~/.config/zsnoop-mcp/hosts.toml
-[hosts.r2d2]
-ssh_target  = "r2d2.example.com"
-agent_mode  = "bootstrap"   # or "preinstalled"
-pools       = ["rpool", "bpool"]
+### Environment requirements
 
-[hosts.c3po]
-ssh_target  = "c3po.example.com"
-agent_mode  = "preinstalled"
-sudo        = true             # run agent as root via passwordless sudo
-pools       = ["tank"]
+The MCP server spawns `ssh` and relies on **agent forwarding** via
+`SSH_AUTH_SOCK`. Some MCP clients (notably `mcp.client.stdio` from the SDK,
+used in scripts and tests) strip env vars by default — they only pass
+`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`. If your client does this,
+`ssh` will fail immediately with `BatchMode=yes` and you'll see a transport
+error citing the agent's stderr.
+
+Claude Code itself passes the user's env through to spawned MCP servers, so
+no special config is usually needed. If you hit "agent unreachable"
+errors that mention publickey/permission failures, ensure your client
+passes `SSH_AUTH_SOCK`:
+
+```jsonc
+"env": {
+  "SSH_AUTH_SOCK": "/path/to/your/ssh-agent.socket"
+}
+```
+
+The server logs a warning at startup if `SSH_AUTH_SOCK` is unset while
+hosts are configured.
+
+## Verify
+
+A quick end-to-end check without spinning up an MCP client:
+
+```sh
+uv run python -c "
+import asyncio
+from zsnoop_mcp.config import load_config
+from zsnoop_mcp.server import find_agent_source
+from zsnoop_mcp.transport import ConnectionPool
+async def go():
+    cfg = load_config('/home/youruser/.config/zsnoop-mcp/hosts.toml')
+    async with ConnectionPool(cfg, find_agent_source()) as p:
+        print(await p.call('r2d2', 'agent_info'))
+asyncio.run(go())
+"
 ```

@@ -1,8 +1,7 @@
 # Security model
 
-> 🚧 The threat model and guarantees here are aspirational for phase 1 and
-> become contractual as phases 2–4 land. Each guarantee is paired with an
-> implementation note describing where it's enforced.
+Each guarantee below is paired with a pointer to where it's enforced in code,
+and with the test that asserts the behaviour.
 
 ## Threat model
 
@@ -28,31 +27,50 @@ the remote user accounts they can already log into. SSH transport security.
 
 ### G1 — No mutation operations are ever exposed
 
-The agent dispatches RPCs through an **explicit allowlist** of method names.
-Any method not in the allowlist returns a JSON-RPC `Method not found` error.
+The agent dispatches RPCs through an **explicit `METHODS` allowlist** in
+`agent/zfs_snoop_agent.py`. Any method not in the dict returns JSON-RPC
+`Method not found` (-32601).
 
-The allowlist contains only read methods (`list_datasets`, `list_snapshots`,
-`diff_snapshots`, `list_dir`, `read_file`, `find`, `file_history`, `agent_info`).
+Allowlist (read-only): `agent_info`, `list_datasets`, `list_snapshots`,
+`diff_snapshots`, `list_dir`, `read_file`, `find_files`, `content_grep`,
+`file_history`, `snapshots_containing`, `first_appearance`, `size_delta`.
 
 Adding a mutating method requires editing the agent source — there is no
-configuration knob that turns mutation on.
+configuration knob that turns mutation on. The test
+`test_methods_table_contains_no_mutating_operations` asserts that no entry
+matching common destructive zfs subcommands ever leaks into the table.
 
 ### G2 — No shell interpretation of user input
 
 Every external command is invoked via `subprocess.run([...], shell=False)`
-with an argv list. Tool inputs that become argv elements (dataset names,
-snapshot names) are validated against a strict character allowlist before
-they are passed.
+with an explicit argv list (`agent.run_zfs`). Tool inputs that become argv
+elements are validated *before* the call:
+
+- Dataset names match `^[A-Za-z0-9_][A-Za-z0-9_.:/-]*$`.
+- Snapshot names match the same plus `@<snap-part>`.
+- Tested by `test_validate_dataset_rejects_invalid` /
+  `test_validate_snapshot_rejects_invalid`.
+
+The local transport also uses an argv list for `ssh`, with the remote shell
+command produced via `shlex.quote()` per token.
 
 ### G3 — Path inputs cannot escape their snapshot root
 
-For any operation that takes a `(snapshot, path)`, the agent computes the
-absolute, resolved path on the remote side and verifies it begins with the
-snapshot's mountpoint (`.../<dataset>/.zfs/snapshot/<snapname>/`). Requests
-that resolve outside the snapshot root are rejected.
+For any operation that takes a `(snapshot, path)`, the agent
+(`agent.resolve_under_snapshot`):
 
-Symbolic links inside snapshots are **not followed** during traversal; their
-targets are reported as data.
+1. Rejects absolute paths and any `..` segment up front.
+2. Resolves the joined path with `Path.resolve(strict=False)` — which follows
+   symlinks — and verifies it stays inside `realpath(snapshot_root)`.
+3. Returns the *unresolved* path so callers can `lstat()` the final component
+   to detect a symlink **without following it**.
+
+`read_file` and `list_dir` then refuse to follow a final-component symlink at
+all; symlinks are reported with their target string as data. Tests:
+`test_resolve_rejects_dotdot_traversal`,
+`test_resolve_rejects_symlink_that_escapes`,
+`test_read_file_refuses_to_follow_symlink`,
+`test_list_dir_reports_symlink_without_following`.
 
 ### G4 — All reads are bounded
 
@@ -60,11 +78,15 @@ targets are reported as data.
 | ------------------ | ------------------------------------------------------ |
 | `read_file`        | `max_bytes` (caller-provided, server-capped at 4 MiB)  |
 | `list_dir`         | `max_entries` (default 1000, server-capped at 10 000)  |
-| `find`             | `max_results` (default 100, server-capped at 1000)     |
-| Per-call wall time | 30 s, enforced via subprocess `timeout=`               |
+| `find_files`       | `max_results` (default 100, server-capped at 1000)     |
+| `content_grep`     | `max_results` (default 100, server-capped at 1000)     |
+| Per zfs subprocess | 30 s wall time, enforced via `subprocess.run(timeout=)` |
+| Transport recv     | 60 s wall time, enforced in `AgentConnection._recv`    |
 
-Exceeding a limit truncates the response and sets a `truncated: true` flag
-rather than failing.
+Exceeding a size limit truncates the response and sets `truncated: true`
+rather than failing. Tested by `test_list_dir_truncates_at_max_entries`,
+`test_find_files_truncates`, and
+`test_read_file_falls_back_to_base64_for_binary` (covers max_bytes).
 
 ### G5 — Defence in depth via ZFS delegation (user mode)
 

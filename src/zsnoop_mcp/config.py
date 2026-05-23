@@ -81,8 +81,9 @@ class Config:
             raise ConfigError(f"unknown host: {name!r}") from e
 
 
-def load_config(path: Path) -> Config:
+def load_config(path: str | Path) -> Config:
     """Load and validate *path* (TOML). Raises :class:`ConfigError` on issues."""
+    path = Path(path)
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as e:

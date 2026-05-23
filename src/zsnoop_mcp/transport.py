@@ -114,6 +114,12 @@ def build_local_argv(agent_source_path: str, *, sudo: bool = False) -> list[str]
 class AgentConnection:
     """Long-lived JSON-RPC channel to one remote agent."""
 
+    # How many stderr lines from the agent to remember for inclusion in
+    # transport-failure messages. Bounded so a chatty agent can't OOM us.
+    _STDERR_TAIL_LIMIT: int = 50
+    # Wait for any pending stderr bytes before giving up after a failure.
+    _STDERR_FINAL_DRAIN_SECS: float = 0.5
+
     def __init__(
         self,
         name: str,
@@ -132,6 +138,7 @@ class AgentConnection:
         self._lock = asyncio.Lock()
         self._next_id = 1
         self._stderr_task: asyncio.Task[None] | None = None
+        self._stderr_tail: list[str] = []
 
     async def call(
         self,
@@ -158,11 +165,13 @@ class AgentConnection:
                         attempt + 1,
                         e,
                     )
+                    stderr_blob = await self._capture_remaining_stderr()
                     await self._close_proc()
                     if attempt == attempts - 1:
-                        raise TransportError(
-                            f"agent on {self.name!r} unreachable after {attempts} attempts: {e}",
-                        ) from e
+                        msg = f"agent on {self.name!r} unreachable after {attempts} attempts: {e}"
+                        if stderr_blob:
+                            msg += f"\nagent stderr:\n{stderr_blob}"
+                        raise TransportError(msg) from e
             # Loop should always either return or raise; this is unreachable.
             raise TransportError(  # pragma: no cover
                 f"agent on {self.name!r} unreachable: {last_error}"
@@ -241,11 +250,37 @@ class AgentConnection:
                 line = await self._proc.stderr.readline()
                 if not line:
                     return
-                log.info("host=%s agent: %s", self.name, line.decode("utf-8", "replace").rstrip())
+                text = line.decode("utf-8", "replace").rstrip()
+                self._stderr_tail.append(text)
+                if len(self._stderr_tail) > self._STDERR_TAIL_LIMIT:
+                    del self._stderr_tail[: -self._STDERR_TAIL_LIMIT]
+                log.info("host=%s agent: %s", self.name, text)
         except asyncio.CancelledError:
             pass
         except Exception:
             log.exception("host=%s stderr drainer crashed", self.name)
+
+    async def _capture_remaining_stderr(self) -> str:
+        """Return whatever the drainer has captured plus a brief settle-time.
+
+        Two concurrent readers on the same :class:`StreamReader` produce
+        undefined behaviour, so we don't read the stream directly here — we
+        just give the background drainer a chance to catch up on any pending
+        lines before we report. If the agent exited before the drainer was
+        scheduled, this short await is what lets its output land in the tail.
+        """
+        deadline = asyncio.get_running_loop().time() + self._STDERR_FINAL_DRAIN_SECS
+        last_seen = -1
+        while asyncio.get_running_loop().time() < deadline:
+            if len(self._stderr_tail) == last_seen:
+                # Nothing new in this slice; let the drainer try once more
+                # then call it done.
+                await asyncio.sleep(0.02)
+                if len(self._stderr_tail) == last_seen:
+                    break
+            last_seen = len(self._stderr_tail)
+            await asyncio.sleep(0.02)
+        return "\n".join(self._stderr_tail)
 
     async def _send(self, request: Mapping[str, Any]) -> None:
         assert self._proc is not None and self._proc.stdin is not None  # noqa: S101
@@ -276,6 +311,8 @@ class AgentConnection:
             return
         proc = self._proc
         self._proc = None
+        # Reset the stderr buffer; next spawn gets a fresh tail.
+        self._stderr_tail = []
         try:
             if proc.stdin is not None and not proc.stdin.is_closing():
                 proc.stdin.close()

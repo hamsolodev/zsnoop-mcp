@@ -8,7 +8,7 @@ host. No mutation operations are ever exposed.
 
 ## How it works
 
-```
+```text
 ┌─────────────────┐   MCP (stdio)    ┌────────────────────┐
 │   MCP client    │ ───────────────► │  zsnoop-mcp server │
 │ (Claude Code,…) │ ◄─────────────── │     (local)        │
@@ -32,46 +32,118 @@ The remote agent is a single-file, stdlib-only Python script. It can be
 pre-installed at `~/bin/zfs-snoop-agent` on each host, or streamed over SSH
 stdin on each connection — no permanent install required.
 
-## Status
-
-🚧 In active development. Phase 1 (scaffold) complete; phases 2–5 to follow.
-
-## Features (planned)
+## Tools exposed to the LLM
 
 Designed around three dominant workflows: **file recovery** ("get me /etc/foo
 as it was yesterday"), **config drift audit** ("when did X change?"), and
 **forensics** ("what was on the box when Y broke?").
 
-- `list_datasets(host)`, `list_snapshots(host, dataset?, time_range?)`
-- `diff_snapshots(host, snap_a, snap_b)`
-- `diff_path_across_snapshots(host, dataset, path, time_range)` — focused diff
-- `list_dir(host, snapshot, path)` — bounded directory listing
-- `read_file(host, snapshot, path, max_bytes)` — bounded read
-- `find_files(host, snapshot, pattern, path?)` — name-pattern search
-- `content_grep(host, snapshot, pattern, path?)` — content search
-- `file_history(host, dataset, path)` — every snapshot version of a file
-- `snapshots_containing(host, dataset, path, time_range?)` — which snapshots have it
-- `first_appearance(host, dataset, path)` — earliest snapshot containing path
-- `size_delta(host, dataset, snap_a, snap_b)` — via `written@snap`
-- `agent_info(host)`
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
+| `list_hosts`           | Configured hosts                                         |
+| `agent_info`           | Agent version, methods, limits                           |
+| `list_datasets`        | Filesystems and volumes                                  |
+| `list_snapshots`       | Snapshots (optionally scoped to a dataset, recursive)    |
+| `diff_snapshots`       | Path-level diff between two snapshots                    |
+| `list_dir`             | Bounded directory listing within a snapshot              |
+| `read_file`            | Bounded read; UTF-8 or base64 for binary                 |
+| `find_files`           | `fnmatch` name search inside a snapshot                  |
+| `content_grep`         | Regex content search inside a snapshot                   |
+| `file_history`         | Every snapshot's version of a given file in a dataset    |
+| `snapshots_containing` | Snapshots in which a path currently exists (time-ranged) |
+| `first_appearance`     | Earliest snapshot containing a path                      |
+| `size_delta`           | Bytes written between two snapshots of one dataset       |
 
-Relative time phrases (`yesterday`, `last week`, `3 days ago`) are parsed on
-the local side; the agent only sees absolute ISO 8601 timestamps. Snapshot
-creation times are extracted from `zfs-auto-snapshot` naming when present and
-fall back to the `creation` property for manual snapshots.
+Time-range parameters accept ISO 8601 *or* human phrases — `yesterday`,
+`last week`, `3 days ago`, `2 hours ago`, etc. Parsing happens locally; the
+agent only sees absolute ISO 8601 timestamps.
 
-### Privileged mode
+## Install
 
-By default the remote agent runs as your SSH user and needs only the `diff`
-ZFS delegation to compare snapshots. Each host may opt into **sudo mode** in
-config, in which case the agent runs as root and can read system-dataset
-files (e.g. `/etc/foo` in `rpool/ROOT/debian` snapshots) the SSH user
-cannot. See [SECURITY.md](docs/SECURITY.md) for the tradeoff.
+### From a clone (dev / current path)
+
+```sh
+git clone git@c3po.example.com:youruser/zsnoop-mcp.git
+cd zsnoop-mcp
+uv sync
+```
+
+### From PyPI (when published)
+
+```sh
+pip install zsnoop-mcp        # or: uv tool install zsnoop-mcp
+```
+
+See [docs/PUBLISHING.md](docs/PUBLISHING.md) for the publish flow.
+
+## Configure
+
+Create `~/.config/zsnoop-mcp/hosts.toml`:
+
+```toml
+[hosts.r2d2]
+ssh_target = "r2d2.example.com"
+agent_mode = "bootstrap"          # or "preinstalled"
+sudo       = false                # set true to read root-owned snapshot files
+pools      = ["rpool", "bpool"]   # used by the LLM for scoping hints
+
+[hosts.c3po]
+ssh_target = "c3po.example.com"
+agent_mode = "bootstrap"
+sudo       = false
+pools      = ["rpool"]
+```
+
+Per-host setup on the remote (one-time):
+
+```sh
+# user mode: grant diff for each pool you want to compare snapshots in
+sudo zfs allow -u $USER diff rpool
+```
+
+See [docs/INSTALL.md](docs/INSTALL.md) for the full setup, including sudo
+mode for reading root-owned snapshot files.
+
+## Wire into Claude Code
+
+Add to `~/.claude/settings.json`:
+
+```jsonc
+{
+  "mcpServers": {
+    "zsnoop": {
+      "command": "uv",
+      "args": ["run", "--directory", "/home/youruser/Documents/worktrees/zsnoop-mcp", "zsnoop-mcp"]
+    }
+  }
+}
+```
+
+Or, after PyPI install with `uv tool install zsnoop-mcp`:
+
+```jsonc
+{
+  "mcpServers": {
+    "zsnoop": {
+      "command": "zsnoop-mcp"
+    }
+  }
+}
+```
+
+Restart your Claude Code session; the tools appear under the `zsnoop` namespace.
+
+## Use
+
+See [docs/USAGE.md](docs/USAGE.md) for example prompts that exercise the
+file-recovery, drift-audit, and forensics workflows.
 
 ## Documentation
 
-- [Installation](docs/INSTALL.md) — local setup, ZFS delegation, MCP client wiring
-- [Security model](docs/SECURITY.md) — threat model, guarantees, limitations
+- [Installation](docs/INSTALL.md) — local setup, ZFS delegation, sudo mode
+- [Usage examples](docs/USAGE.md) — concrete prompts the tools handle
+- [Security model](docs/SECURITY.md) — threat model, guarantees, sudo tradeoff
+- [Publishing](docs/PUBLISHING.md) — releasing to PyPI
 
 ## Development
 
