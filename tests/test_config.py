@@ -69,9 +69,21 @@ def test_unknown_keys_rejected() -> None:
         parse_config({"hosts": {"x": {"ssh_target": "x", "wat": 1}}})
 
 
-def test_missing_ssh_target_rejected() -> None:
+def test_missing_ssh_target_rejected_when_transport_ssh() -> None:
     with pytest.raises(ConfigError, match="ssh_target"):
         parse_config({"hosts": {"x": {}}})
+
+
+def test_ssh_target_optional_when_transport_local() -> None:
+    cfg = parse_config({"hosts": {"localbox": {"transport": "local"}}})
+    host = cfg.host("localbox")
+    assert host.transport == "local"
+    assert host.ssh_target == ""
+
+
+def test_invalid_transport_rejected() -> None:
+    with pytest.raises(ConfigError, match="transport"):
+        parse_config({"hosts": {"x": {"transport": "carrier-pigeon"}}})
 
 
 def test_non_string_ssh_target_rejected() -> None:

@@ -6,6 +6,7 @@ from zsnoop_mcp.transport import (
     AgentRpcError,
     ConnectionPool,
     TransportError,
+    build_argv,
     build_local_argv,
     build_ssh_argv,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "ConnectionPool",
     "HostConfig",
     "TransportError",
+    "build_argv",
     "build_local_argv",
     "build_ssh_argv",
     "load_config",

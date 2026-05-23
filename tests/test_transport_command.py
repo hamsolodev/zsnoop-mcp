@@ -10,6 +10,7 @@ import pytest
 from zsnoop_mcp.config import HostConfig
 from zsnoop_mcp.transport import (
     DEFAULT_SSH_OPTIONS,
+    build_argv,
     build_local_argv,
     build_ssh_argv,
 )
@@ -125,14 +126,44 @@ def test_preinstalled_quotes_paths_with_spaces() -> None:
     assert parts == ["/path with spaces/agent.py"]
 
 
-def test_build_local_argv_default() -> None:
-    argv = build_local_argv(LOCAL_AGENT_PATH)
-    assert argv == ["python3", LOCAL_AGENT_PATH]
+def test_build_local_argv_bootstrap_no_ssh() -> None:
+    cfg = HostConfig(name="here", transport="local", agent_mode="bootstrap")
+    argv = build_local_argv(cfg, AGENT_SOURCE)
+    # No ssh wrapper, no shlex quoting — direct argv.
+    assert argv[0] == "python3"
+    assert argv[1] == "-c"
+    assert "base64.b64decode" in argv[2]
+    assert "ssh" not in argv
+
+
+def test_build_local_argv_preinstalled() -> None:
+    cfg = HostConfig(
+        name="here",
+        transport="local",
+        agent_mode="preinstalled",
+        agent_path="/usr/local/bin/zfs-snoop-agent",
+    )
+    argv = build_local_argv(cfg, AGENT_SOURCE)
+    assert argv == ["/usr/local/bin/zfs-snoop-agent"]
 
 
 def test_build_local_argv_with_sudo() -> None:
-    argv = build_local_argv(LOCAL_AGENT_PATH, sudo=True)
-    assert argv == ["sudo", "python3", LOCAL_AGENT_PATH]
+    cfg = HostConfig(
+        name="here",
+        transport="local",
+        agent_mode="preinstalled",
+        agent_path="/usr/local/bin/zfs-snoop-agent",
+        sudo=True,
+    )
+    argv = build_local_argv(cfg, AGENT_SOURCE)
+    assert argv == ["sudo", "/usr/local/bin/zfs-snoop-agent"]
+
+
+def test_build_argv_dispatches_on_transport() -> None:
+    local_cfg = HostConfig(name="here", transport="local")
+    assert build_argv(local_cfg, AGENT_SOURCE)[0] == "python3"
+    ssh_cfg = HostConfig(name="there", ssh_target="x.lan")
+    assert build_argv(ssh_cfg, AGENT_SOURCE)[0] == "ssh"
 
 
 def test_preinstalled_without_agent_path_raises() -> None:

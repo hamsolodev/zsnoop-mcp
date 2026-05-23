@@ -34,6 +34,9 @@ from typing import Any, Literal
 AgentMode = Literal["bootstrap", "preinstalled"]
 _VALID_MODES: tuple[AgentMode, ...] = ("bootstrap", "preinstalled")
 
+Transport = Literal["ssh", "local"]
+_VALID_TRANSPORTS: tuple[Transport, ...] = ("ssh", "local")
+
 
 class ConfigError(ValueError):
     """Raised when a config file or host stanza is malformed."""
@@ -41,10 +44,11 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class HostConfig:
-    """One remote host the MCP server can talk to."""
+    """One host the MCP server can talk to (remote over SSH, or local)."""
 
     name: str
-    ssh_target: str
+    ssh_target: str = ""
+    transport: Transport = "ssh"
     agent_mode: AgentMode = "bootstrap"
     agent_path: str | None = None
     sudo: bool = False
@@ -54,8 +58,15 @@ class HostConfig:
 
     def __post_init__(self) -> None:
         """Validate the host stanza after construction."""
-        if not self.ssh_target:
-            raise ConfigError(f"host {self.name!r}: ssh_target is required")
+        if self.transport not in _VALID_TRANSPORTS:
+            raise ConfigError(
+                f"host {self.name!r}: transport must be one of {_VALID_TRANSPORTS}, "
+                f"got {self.transport!r}",
+            )
+        if self.transport == "ssh" and not self.ssh_target:
+            raise ConfigError(
+                f"host {self.name!r}: ssh_target is required when transport='ssh'",
+            )
         if self.agent_mode not in _VALID_MODES:
             raise ConfigError(
                 f"host {self.name!r}: agent_mode must be one of {_VALID_MODES}, "
@@ -107,22 +118,28 @@ def parse_config(raw: dict[str, Any]) -> Config:
     return Config(hosts=hosts)
 
 
-_REQUIRED_HOST_KEYS = frozenset({"ssh_target"})
-_OPTIONAL_HOST_KEYS = frozenset(
-    {"agent_mode", "agent_path", "sudo", "remote_python", "ssh_options", "pools"}
+_KNOWN_HOST_KEYS = frozenset(
+    {
+        "ssh_target",
+        "transport",
+        "agent_mode",
+        "agent_path",
+        "sudo",
+        "remote_python",
+        "ssh_options",
+        "pools",
+    },
 )
 
 
 def _parse_host(name: str, stanza: dict[str, Any]) -> HostConfig:
-    extra = stanza.keys() - (_REQUIRED_HOST_KEYS | _OPTIONAL_HOST_KEYS)
+    extra = stanza.keys() - _KNOWN_HOST_KEYS
     if extra:
         raise ConfigError(f"host {name!r}: unknown keys: {sorted(extra)}")
-    for k in _REQUIRED_HOST_KEYS:
-        if k not in stanza:
-            raise ConfigError(f"host {name!r}: missing required key {k!r}")
     return HostConfig(
         name=name,
-        ssh_target=_require_str(name, stanza, "ssh_target"),
+        ssh_target=_optional_str(name, stanza, "ssh_target", ""),
+        transport=_optional_str(name, stanza, "transport", "ssh"),  # type: ignore[arg-type]
         agent_mode=_optional_str(name, stanza, "agent_mode", "bootstrap"),  # type: ignore[arg-type]
         agent_path=stanza.get("agent_path"),
         sudo=_optional_bool(name, stanza, "sudo", default=False),
@@ -130,13 +147,6 @@ def _parse_host(name: str, stanza: dict[str, Any]) -> HostConfig:
         ssh_options=_optional_str_list(name, stanza, "ssh_options"),
         pools=_optional_str_list(name, stanza, "pools"),
     )
-
-
-def _require_str(host: str, stanza: dict[str, Any], key: str) -> str:
-    value = stanza[key]
-    if not isinstance(value, str):
-        raise ConfigError(f"host {host!r}: {key!r} must be a string")
-    return value
 
 
 def _optional_str(host: str, stanza: dict[str, Any], key: str, default: str) -> str:

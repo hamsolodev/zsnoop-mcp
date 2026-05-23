@@ -97,13 +97,16 @@ def build_ssh_argv(config: HostConfig, agent_source: str) -> list[str]:
     return argv
 
 
-def build_local_argv(agent_source_path: str, *, sudo: bool = False) -> list[str]:
-    """Argv to spawn the agent locally (no SSH). For tests and local dev."""
-    argv: list[str] = []
-    if sudo:
-        argv.append("sudo")
-    argv.extend(["python3", agent_source_path])
-    return argv
+def build_local_argv(config: HostConfig, agent_source: str) -> list[str]:
+    """Argv to spawn the agent on the *local* machine (no SSH)."""
+    return _remote_command(config, agent_source)
+
+
+def build_argv(config: HostConfig, agent_source: str) -> list[str]:
+    """Return the argv appropriate for *config*'s transport."""
+    if config.transport == "local":
+        return build_local_argv(config, agent_source)
+    return build_ssh_argv(config, agent_source)
 
 
 # ----------------------------------------------------------------------------
@@ -358,7 +361,7 @@ class ConnectionPool:
         async with self._pool_lock:
             if host not in self._connections:
                 host_config = self._config.host(host)
-                argv = build_ssh_argv(host_config, self._agent_source)
+                argv = build_argv(host_config, self._agent_source)
                 self._connections[host] = AgentConnection(host, argv)
             return self._connections[host]
 

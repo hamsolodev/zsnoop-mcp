@@ -141,18 +141,36 @@ pools         = ["rpool"]
 
 Per-host fields:
 
-| Field           | Default       | Description                                            |
-| --------------- | ------------- | ------------------------------------------------------ |
-| `ssh_target`    | *(required)*  | What gets passed to `ssh`, e.g. `user@host` or alias.  |
-| `agent_mode`    | `"bootstrap"` | `"bootstrap"` or `"preinstalled"`.                     |
-| `agent_path`    | *(required for preinstalled)* | Absolute path to the agent on the remote.  |
-| `sudo`          | `false`       | Run the agent under `sudo` (needs passwordless setup). |
-| `remote_python` | `"python3"`   | Interpreter to use in bootstrap mode.                  |
-| `ssh_options`   | `[]`          | Extra args inserted between `ssh` defaults and target. |
-| `pools`         | `[]`          | Hint to the LLM about which pools exist; not enforced. |
+| Field           | Default                           | Description                                                                                       |
+| --------------- | --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `transport`     | `"ssh"`                           | `"ssh"` (remote) or `"local"` (no SSH, agent runs on this machine).                               |
+| `ssh_target`    | *(required if `transport="ssh"`)* | What gets passed to `ssh`, e.g. `user@host`.                                                      |
+| `agent_mode`    | `"bootstrap"`                     | `"bootstrap"` or `"preinstalled"`.                                                                |
+| `agent_path`    | *(required for preinstalled)*     | Absolute path to the agent script.                                                                |
+| `sudo`          | `false`                           | Run the agent under `sudo` (needs passwordless setup).                                            |
+| `remote_python` | `"python3"`                       | Interpreter to use in bootstrap mode.                                                             |
+| `ssh_options`   | `[]`                              | Extra args inserted between `ssh` defaults and target. Ignored when `transport="local"`.          |
+| `pools`         | `[]`                              | Hint to the LLM about which pools exist (optional — use the `list_pools` tool for live discovery). |
 
 `pools` is metadata only at this layer; the agent itself queries whichever
 datasets it has permission to see.
+
+### Local mode (no SSH)
+
+To run the agent on the *same* machine as the MCP server — useful if the
+machine itself has ZFS, or for testing — set `transport = "local"`:
+
+```toml
+[hosts.this-box]
+transport  = "local"
+agent_mode = "bootstrap"   # still applies: bootstrap runs python3 -c …;
+                           # preinstalled runs the agent script directly
+sudo       = false         # set true to read root-owned snapshot files
+```
+
+`ssh_target` is not required in local mode (any value is ignored). All other
+fields (`agent_mode`, `agent_path`, `sudo`, `remote_python`) behave the same;
+SSH-specific fields (`ssh_options`) are ignored.
 
 ## Wire into Claude Code
 

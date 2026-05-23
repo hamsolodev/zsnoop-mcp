@@ -92,6 +92,10 @@ ssh_target = "c3po.example.com"
 agent_mode = "bootstrap"
 sudo       = false
 pools      = ["rpool"]
+
+[hosts.this-box]
+transport  = "local"              # run the agent on this machine, no SSH
+agent_mode = "bootstrap"
 ```
 
 Per-host setup on the remote (one-time):
