@@ -72,6 +72,16 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         return await _call(host, "agent_info")
 
     @mcp.tool()
+    async def list_pools(host: str) -> dict[str, Any]:
+        """List ZFS pools visible to the agent on `host`.
+
+        Each pool reports ``size``, ``allocated``, ``free`` (bytes), and
+        ``health``. Useful when you don't already know what pools exist —
+        prefer this over the static ``pools`` field in the host config.
+        """
+        return await _call(host, "list_pools")
+
+    @mcp.tool()
     async def list_datasets(host: str) -> dict[str, Any]:
         """List ZFS filesystems and volumes on `host` (no snapshots)."""
         return await _call(host, "list_datasets")

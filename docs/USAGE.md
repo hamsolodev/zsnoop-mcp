@@ -71,6 +71,15 @@ tracking churn rates on a dataset.
 is. If the most recent creation is older than expected, your snapshot job
 isn't running.
 
+## Discovery
+
+> "What pools and datasets exist on r2d2?"
+
+Use `list_pools(host="r2d2")` for pool-level summary (size, allocated,
+free, health), then `list_datasets(host="r2d2")` for filesystems and
+volumes. The static `pools` field in the host config is just a hint — call
+`list_pools` for the live truth.
+
 ## Cross-cutting tips for the LLM
 
 - Time-range parameters (`after`, `before`) accept ISO 8601 *or* phrases like

@@ -206,7 +206,16 @@ def resolve_under_snapshot(snapshot: str, user_path: str) -> tuple[Path, Path]:
 
 def run_zfs(args: list[str]) -> str:
     """Run ``zfs`` with *args*, return stdout, raise on error or timeout."""
-    cmd = ["zfs", *args]
+    return _run_cli("zfs", args)
+
+
+def run_zpool(args: list[str]) -> str:
+    """Run ``zpool`` with *args*, return stdout, raise on error or timeout."""
+    return _run_cli("zpool", args)
+
+
+def _run_cli(binary: str, args: list[str]) -> str:
+    cmd = [binary, *args]
     try:
         result = subprocess.run(
             cmd,
@@ -216,12 +225,12 @@ def run_zfs(args: list[str]) -> str:
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        raise AgentTimeoutError(f"zfs {' '.join(args[:2])} timed out") from e
+        raise AgentTimeoutError(f"{binary} {' '.join(args[:2])} timed out") from e
     except FileNotFoundError as e:
-        raise ZfsError("zfs binary not found on PATH") from e
+        raise ZfsError(f"{binary} binary not found on PATH") from e
     if result.returncode != 0:
         raise ZfsError(
-            f"zfs failed with exit {result.returncode}",
+            f"{binary} failed with exit {result.returncode}",
             data={"stderr": result.stderr.strip(), "argv": cmd},
         )
     return result.stdout
@@ -254,6 +263,26 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
         },
     }
+
+
+def m_list_pools(_params: dict[str, Any]) -> dict[str, Any]:
+    """List ZFS pools available to the agent's user."""
+    out = run_zpool(["list", "-H", "-p", "-o", "name,size,allocated,free,health"])
+    pools = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        name, size, alloc, free, health = line.split("\t")
+        pools.append(
+            {
+                "name": name,
+                "size": _int_or_none(size),
+                "allocated": _int_or_none(alloc),
+                "free": _int_or_none(free),
+                "health": health,
+            },
+        )
+    return {"pools": pools}
 
 
 def m_list_datasets(_params: dict[str, Any]) -> dict[str, Any]:
@@ -585,6 +614,7 @@ def m_size_delta(params: dict[str, Any]) -> dict[str, Any]:
 
 METHODS: Final[dict[str, Any]] = {
     "agent_info": m_agent_info,
+    "list_pools": m_list_pools,
     "list_datasets": m_list_datasets,
     "list_snapshots": m_list_snapshots,
     "diff_snapshots": m_diff_snapshots,

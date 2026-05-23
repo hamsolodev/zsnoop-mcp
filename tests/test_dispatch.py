@@ -142,6 +142,7 @@ def test_methods_table_is_what_we_expect() -> None:
     """If you add or remove a method, update this set deliberately."""
     expected = {
         "agent_info",
+        "list_pools",
         "list_datasets",
         "list_snapshots",
         "diff_snapshots",

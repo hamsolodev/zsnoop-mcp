@@ -17,7 +17,40 @@ def test_agent_info_reports_methods_and_limits() -> None:
     info = agent.m_agent_info({})
     assert info["agent_version"] == agent.AGENT_VERSION
     assert "list_snapshots" in info["methods"]
+    assert "list_pools" in info["methods"]
     assert info["limits"]["max_read_bytes"] == agent.MAX_READ_BYTES
+
+
+def test_list_pools_parses_zpool_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    canned = (
+        "rpool\t10995116277760\t9876543210\t1118573067550\tONLINE\n"
+        "bpool\t2952790016\t1351733248\t1601056768\tONLINE\n"
+    )
+
+    def fake_zpool(args: list[str]) -> str:
+        assert args == ["list", "-H", "-p", "-o", "name,size,allocated,free,health"]
+        return canned
+
+    monkeypatch.setattr(agent, "run_zpool", fake_zpool)
+    result = agent.m_list_pools({})
+    assert result == {
+        "pools": [
+            {
+                "name": "rpool",
+                "size": 10995116277760,
+                "allocated": 9876543210,
+                "free": 1118573067550,
+                "health": "ONLINE",
+            },
+            {
+                "name": "bpool",
+                "size": 2952790016,
+                "allocated": 1351733248,
+                "free": 1601056768,
+                "health": "ONLINE",
+            },
+        ],
+    }
 
 
 # ---- list_datasets ----------------------------------------------------------

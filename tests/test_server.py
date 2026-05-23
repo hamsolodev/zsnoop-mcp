@@ -79,6 +79,7 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
     assert names == {
         "list_hosts",
         "agent_info",
+        "list_pools",
         "list_datasets",
         "list_snapshots",
         "diff_snapshots",

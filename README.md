@@ -42,6 +42,7 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | ---------------------- | -------------------------------------------------------- |
 | `list_hosts`           | Configured hosts                                         |
 | `agent_info`           | Agent version, methods, limits                           |
+| `list_pools`           | ZFS pools visible to the agent (live discovery)          |
 | `list_datasets`        | Filesystems and volumes                                  |
 | `list_snapshots`       | Snapshots (optionally scoped to a dataset, recursive)    |
 | `diff_snapshots`       | Path-level diff between two snapshots                    |
