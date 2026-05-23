@@ -40,3 +40,6 @@ htmlcov/
 .env
 .env.*
 local_hosts.toml
+
+# MkDocs build output
+site/

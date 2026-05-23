@@ -1,0 +1,90 @@
+site_name: zsnoop-mcp
+site_description: Read-only ZFS snapshot exploration over MCP
+# Override at build time, e.g.:
+#   ZSNOOP_REPO_URL=https://your-host/your-org/zsnoop-mcp uv run mkdocs build
+# Gitea-style source view paths (/src/branch/main/...) are assumed.
+repo_url: !ENV [ZSNOOP_REPO_URL, "https://example.invalid/zsnoop-mcp"]
+edit_uri: ""
+docs_dir: docs
+site_dir: site
+
+extra:
+  # Used by mkdocs-macros to build deep links into the repo's source view.
+  # Override the branch:  ZSNOOP_REPO_BRANCH=v0.1.0 uv run mkdocs build
+  repo_branch: !ENV [ZSNOOP_REPO_BRANCH, "main"]
+
+plugins:
+  - search
+  - macros
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Onboarding (tutorial):
+      - Start here: onboarding/index.md
+      - 1. What this project is: onboarding/01-what.md
+      - 2. The remote agent: onboarding/02-agent.md
+      - 3. The transport: onboarding/03-transport.md
+      - 4. The MCP server: onboarding/04-server.md
+      - 5. Configuration: onboarding/05-config.md
+      - 6. Time parsing: onboarding/06-timeparse.md
+      - 7. Testing patterns: onboarding/07-testing.md
+      - 8. Security model: onboarding/08-security.md
+      - 9. Build, package, release: onboarding/09-build.md
+      - 10. Adding a new tool: onboarding/10-extending.md
+  - Reference:
+      - Install: INSTALL.md
+      - Usage: USAGE.md
+      - Security: SECURITY.md
+      - Publishing: PUBLISHING.md
