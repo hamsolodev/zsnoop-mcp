@@ -73,6 +73,8 @@ select = [
 ignore = [
     "D100",      # missing docstring in public module
     "D104",      # missing docstring in public package
+    "D105",      # missing docstring in magic methods (covered by class docstring)
+    "D107",      # missing docstring in __init__ (covered by class docstring)
     "D203",      # one-blank-line-before-class (conflicts with D211)
     "D213",      # multi-line summary second line (conflicts with D212)
     "PLR0913",   # too-many-arguments (we accept this for tool signatures)
