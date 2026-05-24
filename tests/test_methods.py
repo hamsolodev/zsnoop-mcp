@@ -19,6 +19,7 @@ def test_agent_info_reports_methods_and_limits() -> None:
     assert "list_snapshots" in info["methods"]
     assert "list_pools" in info["methods"]
     assert info["limits"]["max_read_bytes"] == agent.MAX_READ_BYTES
+    assert info["limits"]["zfs_diff_timeout_seconds"] == agent.ZFS_DIFF_TIMEOUT_SECONDS
 
 
 def test_list_pools_parses_zpool_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,6 +354,23 @@ def test_diff_snapshots_parses_changes(fake_zfs: FakeZfs) -> None:
     assert ops == ["M", "+", "-", "R"]
     rename = next(c for c in result["changes"] if c["op"] == "R")
     assert rename["new_path"] == "/home/newname"
+
+
+def test_diff_snapshots_uses_diff_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_timeout: float | None = None
+
+    def fake_run_zfs(args: list[str], *, timeout_seconds: float = agent.ZFS_TIMEOUT_SECONDS) -> str:
+        nonlocal seen_timeout
+        assert args == ["diff", "-H", "-F", "rpool/home@a", "rpool/home@b"]
+        seen_timeout = timeout_seconds
+        return ""
+
+    monkeypatch.setattr(agent, "run_zfs", fake_run_zfs)
+
+    result = agent.m_diff_snapshots({"snap_a": "rpool/home@a", "snap_b": "rpool/home@b"})
+
+    assert result["changes"] == []
+    assert seen_timeout == agent.ZFS_DIFF_TIMEOUT_SECONDS
 
 
 # ---- list_dir ---------------------------------------------------------------

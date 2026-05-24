@@ -26,7 +26,10 @@ class FakeZfs:
     def add(self, args: list[str], stdout: str) -> None:
         self._responses[tuple(args)] = stdout
 
-    def __call__(self, args: list[str]) -> str:
+    def __call__(
+        self, args: list[str], *, timeout_seconds: float = agent.ZFS_TIMEOUT_SECONDS
+    ) -> str:
+        _ = timeout_seconds
         self.calls.append(tuple(args))
         try:
             return self._responses[tuple(args)]

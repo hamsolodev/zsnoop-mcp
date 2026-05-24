@@ -40,6 +40,9 @@ DEFAULT_SSH_OPTIONS: tuple[str, ...] = (
     "ServerAliveCountMax=3",
 )
 
+# NDJSON responses are one line; keep this comfortably above default tool caps.
+MAX_LINE_BYTES: int = 16 * 1024 * 1024
+
 
 # ----------------------------------------------------------------------------
 # Errors
@@ -239,6 +242,7 @@ class AgentConnection:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    limit=MAX_LINE_BYTES,
                 ),
                 timeout=self._spawn_timeout,
             )
@@ -298,6 +302,10 @@ class AgentConnection:
         except TimeoutError as e:
             raise TransportError(
                 f"agent on {self.name!r} did not respond within {self._recv_timeout}s",
+            ) from e
+        except ValueError as e:
+            raise TransportError(
+                f"agent on {self.name!r} emitted a line larger than {MAX_LINE_BYTES} bytes",
             ) from e
         if not line:
             raise EOFError(f"agent on {self.name!r} closed stdout")

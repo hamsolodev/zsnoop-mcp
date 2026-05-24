@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from zsnoop_mcp.transport import (
+    MAX_LINE_BYTES,
     AgentConnection,
     AgentRpcError,
     TransportError,
@@ -132,6 +133,41 @@ async def test_garbage_response_raises_transport_error(tmp_path: Path) -> None:
     argv = [sys.executable, str(script)]
     async with AgentConnection("garbage", argv, max_reconnects=0) as conn:
         with pytest.raises(TransportError, match="non-JSON"):
+            await conn.call("agent_info")
+
+
+def _large_response_agent(tmp_path: Path, *, payload_bytes: int) -> Path:
+    script = tmp_path / "large_response_agent.py"
+    script.write_text(
+        textwrap.dedent(f"""\
+            import json, sys
+            line = sys.stdin.readline()
+            req = json.loads(line)
+            payload = "x" * {payload_bytes}
+            sys.stdout.write(json.dumps({{
+                "jsonrpc": "2.0",
+                "id": req["id"],
+                "result": {{"blob": payload}},
+            }}) + "\\n")
+            sys.stdout.flush()
+            """),
+    )
+    return script
+
+
+async def test_large_single_line_response_is_supported(tmp_path: Path) -> None:
+    script = _large_response_agent(tmp_path, payload_bytes=1024 * 1024)
+    argv = [sys.executable, str(script)]
+    async with AgentConnection("large-ok", argv, max_reconnects=0) as conn:
+        result = await conn.call("agent_info")
+    assert len(result["blob"]) == 1024 * 1024
+
+
+async def test_response_larger_than_transport_limit_fails_cleanly(tmp_path: Path) -> None:
+    script = _large_response_agent(tmp_path, payload_bytes=MAX_LINE_BYTES + 1024)
+    argv = [sys.executable, str(script)]
+    async with AgentConnection("too-large", argv, max_reconnects=0) as conn:
+        with pytest.raises(TransportError, match="line larger than"):
             await conn.call("agent_info")
 
 

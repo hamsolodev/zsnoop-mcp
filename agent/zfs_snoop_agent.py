@@ -89,6 +89,8 @@ DEFAULT_BISECT_BYTES: Final = 1 * 1024 * 1024
 
 # Subprocess wall-clock timeout for any single zfs invocation.
 ZFS_TIMEOUT_SECONDS: Final = 30.0
+# ``zfs diff`` can legitimately run much longer than metadata lookups.
+ZFS_DIFF_TIMEOUT_SECONDS: Final = 300.0
 # Wall-clock cap on a single size_breakdown walk. Belt-and-braces against
 # pathological cache-cold filesystems where the entry budget alone is too
 # loose. Truncates with `truncated: true` rather than failing.
@@ -243,24 +245,24 @@ def resolve_under_snapshot(snapshot: str, user_path: str) -> tuple[Path, Path]:
 # ----------------------------------------------------------------------------
 
 
-def run_zfs(args: list[str]) -> str:
+def run_zfs(args: list[str], *, timeout_seconds: float = ZFS_TIMEOUT_SECONDS) -> str:
     """Run ``zfs`` with *args*, return stdout, raise on error or timeout."""
-    return _run_cli("zfs", args)
+    return _run_cli("zfs", args, timeout_seconds=timeout_seconds)
 
 
 def run_zpool(args: list[str]) -> str:
     """Run ``zpool`` with *args*, return stdout, raise on error or timeout."""
-    return _run_cli("zpool", args)
+    return _run_cli("zpool", args, timeout_seconds=ZFS_TIMEOUT_SECONDS)
 
 
-def _run_cli(binary: str, args: list[str]) -> str:
+def _run_cli(binary: str, args: list[str], *, timeout_seconds: float) -> str:
     cmd = [binary, *args]
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=ZFS_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired as e:
@@ -294,6 +296,7 @@ class Limits:
     max_stale_results: int = MAX_STALE_RESULTS
     max_bisect_bytes: int = MAX_BISECT_BYTES
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
+    zfs_diff_timeout_seconds: float = ZFS_DIFF_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
 
 
@@ -315,6 +318,7 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_stale_results": MAX_STALE_RESULTS,
             "max_bisect_bytes": MAX_BISECT_BYTES,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
+            "zfs_diff_timeout_seconds": ZFS_DIFF_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
         },
     }
@@ -662,7 +666,10 @@ def m_diff_snapshots(params: dict[str, Any]) -> dict[str, Any]:
     snap_b = _require_str(params, "snap_b")
     validate_snapshot(snap_a)
     validate_snapshot(snap_b)
-    out = run_zfs(["diff", "-H", "-F", snap_a, snap_b])
+    out = run_zfs(
+        ["diff", "-H", "-F", snap_a, snap_b],
+        timeout_seconds=ZFS_DIFF_TIMEOUT_SECONDS,
+    )
     changes = []
     for line in out.splitlines():
         if not line:
