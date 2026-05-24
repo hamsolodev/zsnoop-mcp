@@ -3,6 +3,17 @@
 Each guarantee below is paired with a pointer to where it's enforced in code,
 and with the test that asserts the behaviour.
 
+> **AI-assisted authorship.** Most of this codebase was drafted by
+> [Claude Code](https://claude.com/claude-code) under human review (see
+> "About this codebase" in the project
+> [README]({{ config.repo_url }}/src/branch/{{ repo_branch }}/README.md)).
+> The security-critical invariants below — the method allowlist, the
+> no-shell guarantee, path confinement, bounded reads — were specified
+> by the human author and are enforced by tests that fail loudly if any
+> new code violates them. If you're doing an independent security audit,
+> treat that as additional motivation, not as reassurance: read the
+> code, not just the docstrings.
+
 ## Threat model
 
 **Trusted:** the user running the local MCP client, the SSH keys they hold,

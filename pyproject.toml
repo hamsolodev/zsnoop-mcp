@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "zsnoop-mcp"
 version = "0.1.0"
-description = "MCP server for read-only exploration of ZFS snapshots on remote hosts over SSH"
+description = "MCP server for read-only exploration of ZFS snapshots on remote hosts over SSH (AI-assisted)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Mark Hellewell", email = "zsnoop-mcp.happiest328@passmail.net" }]
-keywords = ["mcp", "zfs", "snapshots", "ssh"]
+keywords = ["mcp", "zfs", "snapshots", "ssh", "ai-assisted", "claude-code"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: System Administrators",

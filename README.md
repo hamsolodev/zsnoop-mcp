@@ -6,6 +6,18 @@ Browse, diff, search, and read files from any snapshot on any of your ZFS
 hosts through your AI assistant, over a single persistent SSH connection per
 host. No mutation operations are ever exposed.
 
+## About this codebase
+
+This project was developed collaboratively with [Claude
+Code](https://claude.com/claude-code) (Anthropic). The human author (Mark
+Hellewell) defined the architecture, security model, and acceptance
+criteria, and reviewed every change before it landed; Claude handled the
+bulk of the drafting, test scaffolding, refactors, and documentation.
+Read-only-by-construction was a hard requirement from day one, enforced
+by an explicit method allowlist and the test suite — see
+[SECURITY.md](docs/SECURITY.md). If you're reviewing or auditing the
+code, treat that as context, not as a reason to skip the usual scrutiny.
+
 ## How it works
 
 ```text
