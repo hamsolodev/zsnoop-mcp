@@ -89,6 +89,7 @@ DEFAULT_BISECT_BYTES: Final = 1 * 1024 * 1024
 
 # Subprocess wall-clock timeout for any single zfs invocation.
 ZFS_TIMEOUT_SECONDS: Final = 30.0
+ZFS_DIFF_TIMEOUT_SECONDS: Final = 300.0
 # Wall-clock cap on a single size_breakdown walk. Belt-and-braces against
 # pathological cache-cold filesystems where the entry budget alone is too
 # loose. Truncates with `truncated: true` rather than failing.
@@ -243,9 +244,9 @@ def resolve_under_snapshot(snapshot: str, user_path: str) -> tuple[Path, Path]:
 # ----------------------------------------------------------------------------
 
 
-def run_zfs(args: list[str]) -> str:
+def run_zfs(args: list[str], timeout: float = ZFS_TIMEOUT_SECONDS) -> str:
     """Run ``zfs`` with *args*, return stdout, raise on error or timeout."""
-    return _run_cli("zfs", args)
+    return _run_cli("zfs", args, timeout=timeout)
 
 
 def run_zpool(args: list[str]) -> str:
@@ -253,14 +254,14 @@ def run_zpool(args: list[str]) -> str:
     return _run_cli("zpool", args)
 
 
-def _run_cli(binary: str, args: list[str]) -> str:
+def _run_cli(binary: str, args: list[str], timeout: float = ZFS_TIMEOUT_SECONDS) -> str:
     cmd = [binary, *args]
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=ZFS_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired as e:
@@ -294,6 +295,7 @@ class Limits:
     max_stale_results: int = MAX_STALE_RESULTS
     max_bisect_bytes: int = MAX_BISECT_BYTES
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
+    zfs_diff_timeout_seconds: float = ZFS_DIFF_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
 
 
@@ -315,6 +317,7 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_stale_results": MAX_STALE_RESULTS,
             "max_bisect_bytes": MAX_BISECT_BYTES,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
+            "zfs_diff_timeout_seconds": ZFS_DIFF_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
         },
     }
@@ -525,511 +528,11 @@ def m_dataset_properties(params: dict[str, Any]) -> dict[str, Any]:
 
 def m_list_datasets(_params: dict[str, Any]) -> dict[str, Any]:
     """List filesystems and volumes (excludes snapshots)."""
-    out = run_zfs(
-        ["list", "-H", "-p", "-t", "filesystem,volume", "-o", "name,type,mountpoint,used,available"]
-    )
-    datasets = []
-    for line in out.splitlines():
-        if not line:
-            continue
-        name, dtype, mountpoint, used, avail = line.split("\t")
-        datasets.append(
-            {
-                "name": name,
-                "type": dtype,
-                "mountpoint": mountpoint,
-                "used": _int_or_none(used),
-                "avail": _int_or_none(avail),
-            }
-        )
-    return {"datasets": datasets}
+    out = run_zf
 
+... [OUTPUT TRUNCATED - 18311 chars omitted out of 68311 total] ...
 
-def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
-    """List snapshots; optionally scoped to a single dataset (recursive)."""
-    dataset = params.get("dataset")
-    args = ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"]
-    if dataset is not None:
-        validate_dataset(dataset)
-        args += ["-r", dataset]
-    out = run_zfs(args)
-    snaps = []
-    for line in out.splitlines():
-        if not line:
-            continue
-        name, creation, used, refer = line.split("\t")
-        ds, snap = name.split("@", 1) if "@" in name else (name, "")
-        snaps.append(
-            {
-                "name": name,
-                "dataset": ds,
-                "snap": snap,
-                "creation": _int_or_none(creation),
-                "used": _int_or_none(used),
-                "refer": _int_or_none(refer),
-            }
-        )
-    return {"snapshots": snaps}
-
-
-_AUTOSNAP_CLASS_RE: Final = re.compile(
-    r"zfs-auto-snap_(frequent|hourly|daily|weekly|monthly)\b",
-)
-
-
-def _snapshot_class(name: str) -> str:
-    """Classify *name* (snap part of `<dataset>@<snap>`) into a retention bucket.
-
-    Matches the conventional ``zfs-auto-snapshot`` and ``zrepl`` naming
-    schemes; unknown formats are bucketed as ``"other"`` so the caller
-    still sees them in the breakdown rather than silently dropping them.
-    """
-    m = _AUTOSNAP_CLASS_RE.search(name)
-    if m:
-        return m.group(1)
-    lower = name.lower()
-    for kw in ("frequent", "hourly", "daily", "weekly", "monthly"):
-        if kw in lower:
-            return kw
-    return "other"
-
-
-def m_snapshot_cadence(params: dict[str, Any]) -> dict[str, Any]:
-    """Summary stats for the snapshot inventory of one or all datasets.
-
-    Replaces the manual arithmetic of "I called ``list_snapshots`` and got
-    58 entries; what's the cadence, what's the retention window, are
-    there gaps?" with a single structured response.
-
-    If *dataset* is omitted, summarises every snapshot the agent can see
-    (i.e. across all datasets, treated as one population).
-    """
-    dataset = params.get("dataset")
-    if dataset is not None:
-        validate_dataset(dataset)
-    snaps = m_list_snapshots({"dataset": dataset} if dataset else {})["snapshots"]
-    by_class: dict[str, list[dict[str, Any]]] = {}
-    total_used = 0
-    for s in snaps:
-        bucket = _snapshot_class(s["snap"])
-        by_class.setdefault(bucket, []).append(s)
-        if s["used"] is not None:
-            total_used += s["used"]
-    breakdown: list[dict[str, Any]] = []
-    for cls in ("frequent", "hourly", "daily", "weekly", "monthly", "other"):
-        if cls not in by_class:
-            continue
-        group = by_class[cls]
-        creations = sorted(s["creation"] for s in group if s["creation"] is not None)
-        breakdown.append(
-            {
-                "class": cls,
-                "count": len(group),
-                "earliest_creation": creations[0] if creations else None,
-                "latest_creation": creations[-1] if creations else None,
-                "unique_bytes": sum(s["used"] or 0 for s in group),
-            },
-        )
-    # Overall: sorted creations across all snapshots.
-    all_creations = sorted(s["creation"] for s in snaps if s["creation"] is not None)
-    biggest_gap_seconds = None
-    biggest_gap_between: list[str] | None = None
-    # Need at least two timestamps to define a gap between them.
-    if len(all_creations) >= 2:  # noqa: PLR2004
-        gaps = [(all_creations[i] - all_creations[i - 1], i) for i in range(1, len(all_creations))]
-        gap_seconds, gap_idx = max(gaps)
-        biggest_gap_seconds = gap_seconds
-        # Recover the snapshot names at the boundary.
-        creation_to_name = {s["creation"]: s["name"] for s in snaps if s["creation"] is not None}
-        biggest_gap_between = [
-            creation_to_name[all_creations[gap_idx - 1]],
-            creation_to_name[all_creations[gap_idx]],
-        ]
-    return {
-        "dataset": dataset,
-        "total_snapshots": len(snaps),
-        "by_class": breakdown,
-        "earliest_creation": all_creations[0] if all_creations else None,
-        "latest_creation": all_creations[-1] if all_creations else None,
-        "biggest_gap_seconds": biggest_gap_seconds,
-        "biggest_gap_between": biggest_gap_between,
-        "total_unique_bytes": total_used,
-    }
-
-
-def m_diff_snapshots(params: dict[str, Any]) -> dict[str, Any]:
-    snap_a = _require_str(params, "snap_a")
-    snap_b = _require_str(params, "snap_b")
-    validate_snapshot(snap_a)
-    validate_snapshot(snap_b)
-    out = run_zfs(["diff", "-H", "-F", snap_a, snap_b])
-    changes = []
-    for line in out.splitlines():
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) < DIFF_MIN_FIELDS:
-            continue
-        change, ftype, path = parts[0], parts[1], parts[2]
-        entry: dict[str, Any] = {"op": change, "type": ftype, "path": path}
-        if change == "R" and len(parts) >= DIFF_RENAME_FIELDS:
-            entry["new_path"] = parts[3]
-        changes.append(entry)
-    return {"snap_a": snap_a, "snap_b": snap_b, "changes": changes}
-
-
-def m_list_dir(params: dict[str, Any]) -> dict[str, Any]:
-    snapshot = _require_str(params, "snapshot")
-    path = _require_str(params, "path")
-    max_entries = validate_positive_int(
-        params.get("max_entries"),
-        name="max_entries",
-        default=DEFAULT_DIR_ENTRIES,
-        hard_max=MAX_DIR_ENTRIES,
-    )
-    _, target = resolve_under_snapshot(snapshot, path)
-    if not target.is_dir():
-        raise PathError(f"not a directory: {path!r}")
-    entries: list[dict[str, Any]] = []
-    truncated = False
-    try:
-        with os.scandir(target) as it:
-            for entry in it:
-                if len(entries) >= max_entries:
-                    truncated = True
-                    break
-                entries.append(_dir_entry_info(entry))
-    except OSError as e:
-        raise PathError(f"could not list directory: {e}") from e
-    entries.sort(key=lambda e: e["name"])
-    return {
-        "snapshot": snapshot,
-        "path": path,
-        "entries": entries,
-        "truncated": truncated,
-    }
-
-
-def _sum_subtree(
-    root: Path,
-    budget: list[int],
-    deadline: float,
-) -> tuple[int, bool]:
-    """Sum the lstat sizes of every entry under *root*.
-
-    *budget* is a one-element list so callers can observe what's left after
-    nested recursion drains it. *deadline* is a monotonic-clock cutoff.
-
-    Symlinks are counted by their own lstat size and never followed (G3).
-    Subdirectories that error on scandir are skipped silently.
-
-    Returns ``(bytes, truncated)`` where *truncated* is true if either the
-    entry budget or the wall-clock deadline ran out mid-walk.
-    """
-    total = 0
-    truncated = False
-    stack: list[Path] = [root]
-    while stack:
-        if budget[0] <= 0 or time.monotonic() >= deadline:
-            truncated = True
-            break
-        current = stack.pop()
-        try:
-            it = os.scandir(current)
-        except OSError:
-            continue
-        with it:
-            for entry in it:
-                if budget[0] <= 0 or time.monotonic() >= deadline:
-                    truncated = True
-                    break
-                budget[0] -= 1
-                try:
-                    st = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                total += st.st_size
-                # follow_symlinks=False means S_ISDIR is false for symlinks
-                # to dirs, so this is naturally safe (G3).
-                if stat_mod.S_ISDIR(st.st_mode):
-                    stack.append(Path(entry.path))
-    return total, truncated
-
-
-def m_size_breakdown(params: dict[str, Any]) -> dict[str, Any]:
-    """Recursive byte total for a snapshot dir plus per-immediate-child sizes.
-
-    Equivalent in spirit to ``du --max-depth=1 --block-size=1 PATH``: for each
-    immediate child of *path*, recursively sum lstat sizes. Symlinks are never
-    followed; their own inode size is counted but they don't contribute their
-    target's contents.
-
-    Bounded by *max_entries* (default ``DEFAULT_SIZE_WALK_ENTRIES``, hard cap
-    ``MAX_SIZE_WALK_ENTRIES``) and by ``SIZE_WALK_TIMEOUT_SECONDS``. Either
-    limit hitting sets ``truncated: true`` on the response and on each
-    affected child entry, so the caller can tell which subtree was clipped.
-    """
-    snapshot = _require_str(params, "snapshot")
-    path = _require_str(params, "path")
-    max_entries = validate_positive_int(
-        params.get("max_entries"),
-        name="max_entries",
-        default=DEFAULT_SIZE_WALK_ENTRIES,
-        hard_max=MAX_SIZE_WALK_ENTRIES,
-    )
-    _, target = resolve_under_snapshot(snapshot, path)
-    if not target.is_dir():
-        raise PathError(f"not a directory: {path!r}")
-    deadline = time.monotonic() + SIZE_WALK_TIMEOUT_SECONDS
-    budget = [max_entries]
-    try:
-        with os.scandir(target) as it:
-            children = sorted(it, key=lambda e: e.name)
-    except OSError as e:
-        raise PathError(f"could not list directory: {e}") from e
-    entries: list[dict[str, Any]] = []
-    truncated = False
-    total_bytes = 0
-    for child in children:
-        if budget[0] <= 0 or time.monotonic() >= deadline:
-            truncated = True
-            break
-        try:
-            st = child.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        budget[0] -= 1
-        mode = st.st_mode
-        child_bytes = st.st_size
-        child_truncated = False
-        if stat_mod.S_ISLNK(mode):
-            kind = "symlink"
-        elif stat_mod.S_ISDIR(mode):
-            kind = "dir"
-            sub_bytes, child_truncated = _sum_subtree(
-                Path(child.path),
-                budget,
-                deadline,
-            )
-            child_bytes += sub_bytes
-        elif stat_mod.S_ISREG(mode):
-            kind = "file"
-        else:
-            kind = "other"
-        entries.append(
-            {
-                "name": child.name,
-                "type": kind,
-                "bytes": child_bytes,
-                "is_truncated": child_truncated,
-            }
-        )
-        total_bytes += child_bytes
-        if child_truncated:
-            truncated = True
-    return {
-        "snapshot": snapshot,
-        "path": path,
-        "total_bytes": total_bytes,
-        "entries": entries,
-        "walked_entries": max_entries - budget[0],
-        "truncated": truncated,
-    }
-
-
-class _TopHeap:
-    """Bounded top-N heap used by :func:`m_top_consumers`.
-
-    Stores ``(bytes, counter, payload)`` so dicts are never compared by
-    heapq when two entries have the same byte size.
-    """
-
-    def __init__(self, n: int, root: Path) -> None:
-        self._n = n
-        self._root = root
-        self._heap: list[tuple[int, int, dict[str, Any]]] = []
-        self._counter = 0
-
-    def push(self, entry_path: Path, kind: str, byte_count: int) -> None:
-        try:
-            rel = entry_path.relative_to(self._root)
-        except ValueError:
-            rel = entry_path
-        item = {"path": str(rel), "type": kind, "bytes": byte_count}
-        if len(self._heap) < self._n:
-            heapq.heappush(self._heap, (byte_count, self._counter, item))
-        elif byte_count > self._heap[0][0]:
-            heapq.heapreplace(self._heap, (byte_count, self._counter, item))
-        self._counter += 1
-
-    def sorted(self) -> list[dict[str, Any]]:
-        return [item for _b, _c, item in sorted(self._heap, key=lambda x: x[0], reverse=True)]
-
-
-def _walk_for_top_consumers(
-    dir_path: Path,
-    heap: _TopHeap,
-    budget: list[int],
-    deadline: float,
-) -> tuple[int, bool]:
-    """Walk *dir_path*, push every entry into *heap*, return ``(bytes, truncated)``.
-
-    Iterates lstat-style (G3 — never follows symlinks). The dir's own
-    inode size is added to the returned subtree total to match ``du``
-    semantics.
-    """
-    subtree_total = 0
-    if budget[0] <= 0 or time.monotonic() >= deadline:
-        return subtree_total, True
-    try:
-        it = os.scandir(dir_path)
-    except OSError:
-        return subtree_total, False
-    truncated = False
-    with it:
-        for entry in it:
-            if budget[0] <= 0 or time.monotonic() >= deadline:
-                truncated = True
-                break
-            budget[0] -= 1
-            try:
-                st = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            mode = st.st_mode
-            if stat_mod.S_ISDIR(mode):
-                sub_bytes, sub_trunc = _walk_for_top_consumers(
-                    Path(entry.path),
-                    heap,
-                    budget,
-                    deadline,
-                )
-                dir_total = st.st_size + sub_bytes
-                heap.push(Path(entry.path), "dir", dir_total)
-                subtree_total += dir_total
-                if sub_trunc:
-                    truncated = True
-            else:
-                kind = (
-                    "symlink"
-                    if stat_mod.S_ISLNK(mode)
-                    else "file"
-                    if stat_mod.S_ISREG(mode)
-                    else "other"
-                )
-                heap.push(Path(entry.path), kind, st.st_size)
-                subtree_total += st.st_size
-    return subtree_total, truncated
-
-
-def m_top_consumers(params: dict[str, Any]) -> dict[str, Any]:
-    """Top-N largest files and directories within a snapshot subtree.
-
-    Walks the subtree bounded by ``max_entries`` (same as ``size_breakdown``)
-    and keeps a heap of the *N* largest entries seen. For directories, the
-    reported ``bytes`` is the recursive subtree sum (so the result is like
-    ``du -ab | sort -rn | head -n``, minus the request path itself).
-
-    Use after ``size_breakdown`` once you've identified a big subtree:
-    ``size_breakdown`` says "here's how the children split"; this says
-    "here are the specific files and dirs hogging space, ranked".
-    Symlinks are counted by their own lstat size and never followed (G3).
-    """
-    snapshot = _require_str(params, "snapshot")
-    path = _require_str(params, "path")
-    n = validate_positive_int(
-        params.get("n"),
-        name="n",
-        default=DEFAULT_TOP_CONSUMERS,
-        hard_max=MAX_TOP_CONSUMERS,
-    )
-    max_entries = validate_positive_int(
-        params.get("max_entries"),
-        name="max_entries",
-        default=DEFAULT_SIZE_WALK_ENTRIES,
-        hard_max=MAX_SIZE_WALK_ENTRIES,
-    )
-    _, target = resolve_under_snapshot(snapshot, path)
-    if not target.is_dir():
-        raise PathError(f"not a directory: {path!r}")
-    deadline = time.monotonic() + SIZE_WALK_TIMEOUT_SECONDS
-    budget = [max_entries]
-    heap = _TopHeap(n, target.resolve())
-    _bytes, truncated = _walk_for_top_consumers(target, heap, budget, deadline)
-    return {
-        "snapshot": snapshot,
-        "path": path,
-        "entries": heap.sorted(),
-        "walked_entries": max_entries - budget[0],
-        "truncated": truncated,
-    }
-
-
-def m_stale_snapshots(params: dict[str, Any]) -> dict[str, Any]:
-    """Snapshots older than ``older_than``, sorted by unique bytes used.
-
-    Resolves ``older_than`` (ISO 8601 or a human phrase like
-    ``"6 months ago"``) to a Unix timestamp and returns the snapshots
-    whose creation predates it. Sort order is descending ``used`` —
-    the biggest-by-unique-bytes appear first, which is what you want
-    when deciding what to cull.
-
-    Scoped to *dataset* if given, else covers every visible snapshot.
-    Bounded by ``max_results`` (default 1000, capped at 10 000).
-    """
-    dataset = params.get("dataset")
-    if dataset is not None:
-        validate_dataset(dataset)
-    older_than = _require_str(params, "older_than")
-    older_than_ts = _iso_to_ts(older_than, name="older_than")
-    if older_than_ts is None:
-        raise InvalidParams("older_than must be a non-null ISO 8601 string")
-    max_results = validate_positive_int(
-        params.get("max_results"),
-        name="max_results",
-        default=DEFAULT_STALE_RESULTS,
-        hard_max=MAX_STALE_RESULTS,
-    )
-    snaps = m_list_snapshots({"dataset": dataset} if dataset else {})["snapshots"]
-    stale = [s for s in snaps if s["creation"] is not None and s["creation"] < older_than_ts]
-    stale.sort(key=lambda s: s["used"] or 0, reverse=True)
-    truncated = len(stale) > max_results
-    return {
-        "dataset": dataset,
-        "older_than_unix": older_than_ts,
-        "snapshots": stale[:max_results],
-        "truncated": truncated,
-    }
-
-
-# `bisect_change` predicate kinds. Validated at the dispatch boundary so a
-# malformed predicate fails fast rather than mid-search.
-_PREDICATE_KINDS: Final = frozenset(
-    {
-        "exists",
-        "contains",
-        "sha256_equals",
-        "size_at_least",
-    }
-)
-
-
-def _validate_predicate(pred: object) -> dict[str, Any]:
-    if not isinstance(pred, dict) or "kind" not in pred:
-        raise InvalidParams("predicate must be a dict with a 'kind' field")
-    kind = pred["kind"]
-    if kind not in _PREDICATE_KINDS:
-        raise InvalidParams(
-            f"predicate kind must be one of {sorted(_PREDICATE_KINDS)}, got {kind!r}",
-        )
-    if kind == "contains":
-        if not isinstance(pred.get("needle"), str) or not pred["needle"]:
-            raise InvalidParams("predicate 'contains' requires non-empty 'needle' string")
-    elif kind == "sha256_equals":
-        h = pred.get("hash")
-        if not isinstance(h, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", h):
-            raise InvalidParams("predicate 'sha256_equals' requires 64-hex-char 'hash'")
-    elif kind == "size_at_least":
+ elif kind == "size_at_least":
         size = pred.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
             raise InvalidParams("predicate 'size_at_least' requires non-negative int 'size'")
