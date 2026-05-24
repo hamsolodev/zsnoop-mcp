@@ -35,7 +35,7 @@ jobs:
             || { echo "ERROR: agent script not present in wheel" >&2; exit 1; }
 
       - name: Upload dist artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
