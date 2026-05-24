@@ -1,5 +1,10 @@
 # zsnoop-mcp
 
+[![PyPI](https://img.shields.io/pypi/v/zsnoop-mcp.svg)](https://pypi.org/project/zsnoop-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/zsnoop-mcp.svg)](https://pypi.org/project/zsnoop-mcp/)
+[![License: MIT](https://img.shields.io/pypi/l/zsnoop-mcp.svg)](https://github.com/hamsolodev/zsnoop-mcp/blob/main/LICENSE)
+[![CI](https://github.com/hamsolodev/zsnoop-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/hamsolodev/zsnoop-mcp/actions/workflows/ci.yml)
+
 An MCP server for **read-only exploration of ZFS snapshots on remote hosts**.
 
 Browse, diff, search, and read files from any snapshot on any of your ZFS
@@ -87,7 +92,7 @@ agent only sees absolute ISO 8601 timestamps.
 ### From a clone (dev / current path)
 
 ```sh
-git clone git@example.com:youruser/zsnoop-mcp.git
+git clone https://github.com/hamsolodev/zsnoop-mcp.git
 cd zsnoop-mcp
 uv sync
 ```

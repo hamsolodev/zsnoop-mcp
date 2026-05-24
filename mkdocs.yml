@@ -2,8 +2,7 @@ site_name: zsnoop-mcp
 site_description: Read-only ZFS snapshot exploration over MCP
 # Override at build time, e.g.:
 #   ZSNOOP_REPO_URL=https://your-host/your-org/zsnoop-mcp uv run mkdocs build
-# Gitea-style source view paths (/src/branch/main/...) are assumed.
-repo_url: !ENV [ZSNOOP_REPO_URL, "https://example.invalid/zsnoop-mcp"]
+repo_url: !ENV [ZSNOOP_REPO_URL, "https://github.com/hamsolodev/zsnoop-mcp"]
 edit_uri: ""
 docs_dir: docs
 site_dir: site
@@ -12,6 +11,10 @@ extra:
   # Used by mkdocs-macros to build deep links into the repo's source view.
   # Override the branch:  ZSNOOP_REPO_BRANCH=v0.1.0 uv run mkdocs build
   repo_branch: !ENV [ZSNOOP_REPO_BRANCH, "main"]
+  # Source-view path segment between repo_url and branch. GitHub uses
+  # /blob/; Gitea uses /src/branch/. Override:
+  #   ZSNOOP_SOURCE_PREFIX=/src/branch uv run mkdocs build
+  source_url_prefix: !ENV [ZSNOOP_SOURCE_PREFIX, "/blob"]
 
 plugins:
   - search

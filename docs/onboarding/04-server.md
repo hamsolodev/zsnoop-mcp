@@ -2,7 +2,7 @@
 
 ## What
 
-[`src/zsnoop_mcp/server.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp/server.py) — registers
+[`src/zsnoop_mcp/server.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/server.py) — registers
 every read-only operation as a FastMCP tool, validates host names,
 translates human time phrases, and maps exceptions to MCP error responses.
 
@@ -134,7 +134,7 @@ except TimePhraseError as e:
 return await _call(host, "snapshots_containing", {..., "after": after_iso, "before": before_iso})
 ```
 
-`maybe_to_iso` is in [`timeparse.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp/timeparse.py) —
+`maybe_to_iso` is in [`timeparse.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/timeparse.py) —
 see [Time parsing](06-timeparse.md) for what it accepts.
 
 ### `find_agent_source()` — where the agent script comes from
@@ -159,7 +159,7 @@ def find_agent_source() -> str:
     raise FileNotFoundError(...)
 ```
 
-For wheel installs, [pyproject.toml]({{ config.repo_url }}/src/branch/{{ repo_branch }}/pyproject.toml) has:
+For wheel installs, [pyproject.toml]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/pyproject.toml) has:
 
 ```toml
 [tool.hatch.build.targets.wheel.force-include]

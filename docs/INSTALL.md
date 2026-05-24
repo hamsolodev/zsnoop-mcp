@@ -13,7 +13,7 @@
 ### From source
 
 ```sh
-git clone git@example.com:youruser/zsnoop-mcp.git
+git clone https://github.com/hamsolodev/zsnoop-mcp.git
 cd zsnoop-mcp
 uv sync
 ```

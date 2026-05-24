@@ -67,8 +67,8 @@ boring protocols.
 | Layer | Lives in | Responsibility |
 | --- | --- | --- |
 | MCP client | not in this repo | speaks MCP; usually the LLM's host process |
-| MCP server | [src/zsnoop_mcp/]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp) | translates MCP tool calls ⇄ agent JSON-RPC; manages connections; parses time phrases |
-| Agent | [agent/zfs_snoop_agent.py]({{ config.repo_url }}/src/branch/{{ repo_branch }}/agent/zfs_snoop_agent.py) | does the actual `zfs` / file work; nothing else |
+| MCP server | [src/zsnoop_mcp/]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp) | translates MCP tool calls ⇄ agent JSON-RPC; manages connections; parses time phrases |
+| Agent | [agent/zfs_snoop_agent.py]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/agent/zfs_snoop_agent.py) | does the actual `zfs` / file work; nothing else |
 
 ### Why this split
 

@@ -32,8 +32,11 @@ dependencies = [
 zsnoop-mcp = "zsnoop_mcp.__main__:main"
 
 [project.urls]
-# Replace with the real source URL before publishing to PyPI.
-Homepage = "https://example.invalid/zsnoop-mcp"
+Homepage = "https://github.com/hamsolodev/zsnoop-mcp"
+Documentation = "https://hamsolodev.github.io/zsnoop-mcp/"
+Source = "https://github.com/hamsolodev/zsnoop-mcp"
+Issues = "https://github.com/hamsolodev/zsnoop-mcp/issues"
+Changelog = "https://github.com/hamsolodev/zsnoop-mcp/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [

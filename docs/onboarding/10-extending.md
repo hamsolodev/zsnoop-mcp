@@ -29,7 +29,7 @@ dataset-level), so it's a new method.
 ### Step 2 — Implement the agent method
 
 Add the function and register it in `METHODS` in
-[`agent/zfs_snoop_agent.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/agent/zfs_snoop_agent.py):
+[`agent/zfs_snoop_agent.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/agent/zfs_snoop_agent.py):
 
 ```python
 def m_list_pools(_params: dict[str, Any]) -> dict[str, Any]:
@@ -76,7 +76,7 @@ METHODS: Final[dict[str, Any]] = {
 
 ### Step 3 — Update the allowlist test
 
-[`tests/test_dispatch.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_dispatch.py) has an explicit
+[`tests/test_dispatch.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_dispatch.py) has an explicit
 list of all expected methods:
 
 ```python
@@ -94,7 +94,7 @@ acknowledging it in this test is a code review red flag.
 
 ### Step 4 — Write a method test
 
-In [`tests/test_methods.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_methods.py):
+In [`tests/test_methods.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_methods.py):
 
 ```python
 def test_list_pools_parses_zpool_output(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,7 +122,7 @@ parsing regressions in one test.
 
 ### Step 5 — Register the MCP tool
 
-In [`src/zsnoop_mcp/server.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp/server.py), inside
+In [`src/zsnoop_mcp/server.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/server.py), inside
 `create_server`:
 
 ```python
@@ -150,7 +150,7 @@ Three things to get right:
 
 ### Step 6 — Update the server's tool-registration test
 
-In [`tests/test_server.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_server.py):
+In [`tests/test_server.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_server.py):
 
 ```python
 async def test_server_registers_expected_tools(...) -> None:

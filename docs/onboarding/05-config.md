@@ -2,7 +2,7 @@
 
 ## What
 
-[`src/zsnoop_mcp/config.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp/config.py) — the
+[`src/zsnoop_mcp/config.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/config.py) — the
 dataclasses and TOML loader for `hosts.toml`.
 
 ## Why frozen dataclasses
@@ -104,7 +104,7 @@ def load_config(path: str | Path) -> Config:
 ```
 
 Test:
-[`test_load_config_round_trip`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_config.py).
+[`test_load_config_round_trip`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_config.py).
 
 ## What to read next
 

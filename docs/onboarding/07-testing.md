@@ -28,7 +28,7 @@ ritual when shipping.
 ### `FakeZfs` — substitute for `run_zfs` / `run_zpool`
 
 Used by every agent method test except path-safety. Lives in
-[`tests/conftest.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/conftest.py):
+[`tests/conftest.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/conftest.py):
 
 ```python
 class FakeZfs:
@@ -89,7 +89,7 @@ real files.
 ### `FakePool` — substitute for `ConnectionPool`
 
 Used by server tests. From
-[`tests/test_server.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_server.py):
+[`tests/test_server.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_server.py):
 
 ```python
 class FakePool:
@@ -112,7 +112,7 @@ error mapping (`AgentRpcError → ValueError`, `TransportError → RuntimeError`
 ### Real agent as a local subprocess
 
 The one integration test that *does* spawn a real process —
-[`tests/test_transport_local.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_transport_local.py)
+[`tests/test_transport_local.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_transport_local.py)
 runs the real `agent/zfs_snoop_agent.py` under `[sys.executable, …]` and
 talks to it via the real `AgentConnection`. No SSH, no ZFS — the agent
 methods either reflect their inputs or hit our fake-zfs setup.

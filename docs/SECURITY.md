@@ -6,7 +6,7 @@ and with the test that asserts the behaviour.
 > **AI-assisted authorship.** Most of this codebase was drafted by
 > [Claude Code](https://claude.com/claude-code) under human review (see
 > "About this codebase" in the project
-> [README]({{ config.repo_url }}/src/branch/{{ repo_branch }}/README.md)).
+> [README]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/README.md)).
 > The security-critical invariants below — the method allowlist, the
 > no-shell guarantee, path confinement, bounded reads — were specified
 > by the human author and are enforced by tests that fail loudly if any
@@ -163,4 +163,15 @@ user mode for everything else.
 
 ## Reporting a vulnerability
 
-Email `zsnoop-mcp.happiest328@passmail.net` with the subject `[zsnoop-mcp] security`.
+**Preferred:** open a private vulnerability report via the GitHub Security
+Advisory tab on the repository:
+<https://github.com/hamsolodev/zsnoop-mcp/security/advisories/new>.
+This keeps the report confidential and pre-fills the CVE workflow.
+
+**Alternative:** email `zsnoop-mcp.happiest328@passmail.net` with the
+subject `[zsnoop-mcp] security`. Use this if you don't have a GitHub
+account, or for a quick "I'm not sure if this is a vulnerability" check.
+
+Please don't open public issues for security reports — both channels above
+keep the discussion private until a fix lands and a coordinated disclosure
+window has passed.

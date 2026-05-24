@@ -2,7 +2,7 @@
 
 ## What
 
-[`src/zsnoop_mcp/timeparse.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp/timeparse.py) — turns
+[`src/zsnoop_mcp/timeparse.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/timeparse.py) — turns
 human time phrases (`"yesterday"`, `"3 days ago"`, `"last week"`) into
 absolute ISO 8601 timestamps the agent understands.
 
@@ -60,7 +60,7 @@ def parse_phrase(phrase: str, *, now: datetime | None = None) -> datetime:
 
 The dependency-injectable `now` parameter is **critical for testing**.
 Every test in
-[tests/test_timeparse.py]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_timeparse.py) passes a fixed
+[tests/test_timeparse.py]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_timeparse.py) passes a fixed
 `NOW = datetime(2026, 5, 13, 14, 30, 0, tzinfo=UTC)` so results don't
 drift with the wall clock.
 
@@ -100,7 +100,7 @@ def _start_of_previous(now: datetime, unit: str) -> datetime:
 ```
 
 For Wednesday 2026-05-13, "last week" = Monday 2026-05-04 00:00. Test:
-[`test_last_week_is_previous_monday_midnight`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_timeparse.py).
+[`test_last_week_is_previous_monday_midnight`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_timeparse.py).
 
 ## What to read next
 

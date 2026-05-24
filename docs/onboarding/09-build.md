@@ -5,7 +5,7 @@
 The project uses [**uv**](https://docs.astral.sh/uv/) for environment
 management and [**hatchling**](https://hatch.pypa.io/) as the build
 backend. Both are configured in
-[`pyproject.toml`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/pyproject.toml).
+[`pyproject.toml`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/pyproject.toml).
 
 ## Why this stack
 
@@ -70,7 +70,7 @@ development but breaks after `pip install` / `uv tool install`).
 
 ### The force-include trick
 
-This is the line in [pyproject.toml]({{ config.repo_url }}/src/branch/{{ repo_branch }}/pyproject.toml) that ships the
+This is the line in [pyproject.toml]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/pyproject.toml) that ships the
 agent inside the wheel:
 
 ```toml
@@ -86,7 +86,7 @@ Force-include solves "must be in the wheel for installs, must be a
 standalone file for editing".
 
 `find_agent_source()` in
-[`server.py`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/src/zsnoop_mcp/server.py) handles both cases —
+[`server.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/server.py) handles both cases —
 `importlib.resources` for wheel installs, parent-directory walk for
 editable installs.
 
@@ -115,7 +115,7 @@ uv run ruff format
 uv run mypy
 ```
 
-All three are wired into [`.pre-commit-config.yaml`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/.pre-commit-config.yaml).
+All three are wired into [`.pre-commit-config.yaml`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/.pre-commit-config.yaml).
 Mypy runs via `uv run` rather than mirrors-mypy so it sees the project's
 actual installed deps (the pytest stubs and the editable `zsnoop_mcp`).
 
