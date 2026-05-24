@@ -9,8 +9,10 @@ import pytest
 from zsnoop_mcp.config import (
     Config,
     ConfigError,
+    ConfigFileNotFoundError,
     HostConfig,
     load_config,
+    missing_config_message,
     parse_config,
 )
 
@@ -135,8 +137,36 @@ sudo = true
 
 
 def test_load_config_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="not found"):
-        load_config(tmp_path / "does_not_exist.toml")
+    missing = tmp_path / "does_not_exist.toml"
+    with pytest.raises(ConfigFileNotFoundError) as excinfo:
+        load_config(missing)
+    # Subclass of ConfigError so existing handlers still catch it.
+    assert isinstance(excinfo.value, ConfigError)
+    assert excinfo.value.path == missing
+
+
+def test_missing_config_message_is_actionable(tmp_path: Path) -> None:
+    msg = missing_config_message(tmp_path / "hosts.toml")
+    # The user must see exactly where the file is expected.
+    assert str(tmp_path / "hosts.toml") in msg
+    # And a copy-pasteable minimal example.
+    assert "[hosts." in msg
+    assert "ssh_target" in msg
+    assert "agent_mode" in msg
+    # And a pointer to the override mechanism + canonical docs.
+    assert "ZSNOOP_CONFIG" in msg or "--config" in msg
+    assert "INSTALL.md" in msg
+
+
+def test_empty_hosts_table_suggests_minimal_example() -> None:
+    with pytest.raises(ConfigError, match="at least one"):
+        parse_config({"hosts": {}})
+    # And the message embeds the same minimal example for copy-paste:
+    try:
+        parse_config({"hosts": {}})
+    except ConfigError as e:
+        assert "[hosts." in str(e)
+        assert "ssh_target" in str(e)
 
 
 def test_load_config_invalid_toml(tmp_path: Path) -> None:

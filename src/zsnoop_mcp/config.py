@@ -42,6 +42,44 @@ class ConfigError(ValueError):
     """Raised when a config file or host stanza is malformed."""
 
 
+class ConfigFileNotFoundError(ConfigError):
+    """Raised specifically when the config file is missing.
+
+    Separate from the generic ``ConfigError`` so the CLI can print a
+    longer, more helpful "here's what to create" message for first-run
+    users rather than a one-line "file not found".
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"config file not found: {path}")
+        self.path = path
+
+
+MINIMAL_EXAMPLE_TOML = """\
+[hosts.r2d2]
+ssh_target = "r2d2.example.com"
+agent_mode = "bootstrap"
+sudo = false
+"""
+
+
+def missing_config_message(path: Path) -> str:
+    """Return a multi-line, copy-pasteable error message for a missing config.
+
+    Used by the CLI when ``load_config`` raises ``ConfigFileNotFoundError``.
+    """
+    return (
+        f"zsnoop-mcp: no config file at {path}\n"
+        "\n"
+        "zsnoop-mcp needs a TOML file listing the hosts it can connect to.\n"
+        "Create the file above with at least one host stanza, for example:\n"
+        "\n" + "".join(f"  {line}\n" for line in MINIMAL_EXAMPLE_TOML.splitlines()) + "\n"
+        "Override the config path with --config or $ZSNOOP_CONFIG.\n"
+        "See docs/INSTALL.md for the full reference (preinstalled-agent mode,\n"
+        "sudo mode, local transport, ssh_options, etc.).\n"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class HostConfig:
     """One host the MCP server can talk to (remote over SSH, or local)."""
@@ -98,7 +136,7 @@ def load_config(path: str | Path) -> Config:
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as e:
-        raise ConfigError(f"config file not found: {path}") from e
+        raise ConfigFileNotFoundError(path) from e
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"invalid TOML in {path}: {e}") from e
     return parse_config(raw)
@@ -107,15 +145,25 @@ def load_config(path: str | Path) -> Config:
 def parse_config(raw: dict[str, Any]) -> Config:
     """Validate a parsed config dict and return a typed :class:`Config`."""
     if "hosts" not in raw or not isinstance(raw["hosts"], dict):
-        raise ConfigError("config must have a [hosts] table with at least one entry")
+        raise ConfigError(
+            "config must have a [hosts] table with at least one entry.\n"
+            "Minimal example:\n\n" + _indent(MINIMAL_EXAMPLE_TOML, "  "),
+        )
     hosts: dict[str, HostConfig] = {}
     for name, stanza in raw["hosts"].items():
         if not isinstance(stanza, dict):
             raise ConfigError(f"host {name!r}: stanza must be a table")
         hosts[name] = _parse_host(name, stanza)
     if not hosts:
-        raise ConfigError("config must define at least one host")
+        raise ConfigError(
+            "config must define at least one host.\n"
+            "Minimal example:\n\n" + _indent(MINIMAL_EXAMPLE_TOML, "  "),
+        )
     return Config(hosts=hosts)
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "".join(f"{prefix}{line}\n" for line in text.splitlines())
 
 
 _KNOWN_HOST_KEYS = frozenset(

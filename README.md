@@ -64,7 +64,7 @@ agent only sees absolute ISO 8601 timestamps.
 ### From a clone (dev / current path)
 
 ```sh
-git clone git@c3po.example.com:youruser/zsnoop-mcp.git
+git clone git@example.com:youruser/zsnoop-mcp.git
 cd zsnoop-mcp
 uv sync
 ```

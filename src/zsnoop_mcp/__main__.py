@@ -9,7 +9,13 @@ import os
 import sys
 from pathlib import Path
 
-from zsnoop_mcp.config import Config, ConfigError, load_config
+from zsnoop_mcp.config import (
+    Config,
+    ConfigError,
+    ConfigFileNotFoundError,
+    load_config,
+    missing_config_message,
+)
 from zsnoop_mcp.server import create_server, find_agent_source
 from zsnoop_mcp.transport import ConnectionPool
 
@@ -92,6 +98,9 @@ def main() -> int:
     )
     try:
         asyncio.run(_amain(args))
+    except ConfigFileNotFoundError as e:
+        print(missing_config_message(e.path), file=sys.stderr)
+        return 2
     except ConfigError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
