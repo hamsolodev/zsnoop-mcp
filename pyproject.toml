@@ -38,6 +38,7 @@ Homepage = "https://example.invalid/zsnoop-mcp"
 [dependency-groups]
 dev = [
     "mypy>=1.11",
+    "pip-audit>=2.7",
     "pre-commit>=3.8",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

@@ -119,6 +119,26 @@ All three are wired into [`.pre-commit-config.yaml`]({{ config.repo_url }}/src/b
 Mypy runs via `uv run` rather than mirrors-mypy so it sees the project's
 actual installed deps (the pytest stubs and the editable `zsnoop_mcp`).
 
+### CVE scanning
+
+```sh
+uv run pip-audit --skip-editable
+```
+
+[`pip-audit`](https://pypi.org/project/pip-audit/) is PyPA's vulnerability
+scanner; it walks the live venv's resolved deps and queries the PyPI
+advisory database (which mirrors OSV.dev). The pre-commit hook runs it
+**only when `pyproject.toml` or `uv.lock` change**, so day-to-day commits
+stay fast; we also re-run it manually before publishing (see
+[PUBLISHING.md](../PUBLISHING.md)) to catch advisories that may have
+landed against an otherwise-unchanged pinned dep.
+
+`--skip-editable` excludes the in-tree `zsnoop-mcp` itself, which isn't
+on PyPI yet and so can't be looked up. Findings exit nonzero and block
+the commit; the resolutions are bump the dep (`uv lock --upgrade-package
+<name>`), or — for a deliberately-accepted finding — `--ignore-vuln <ID>`
+with a comment in the hook config explaining why.
+
 ### Releasing to PyPI
 
 See [docs/PUBLISHING.md](../PUBLISHING.md) for the two release paths

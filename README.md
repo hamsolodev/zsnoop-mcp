@@ -170,13 +170,17 @@ file-recovery, drift-audit, and forensics workflows.
 ## Development
 
 ```sh
-uv sync                    # install runtime + dev deps into .venv
-uv run pytest              # tests
-uv run ruff check          # lint
-uv run ruff format         # format
-uv run mypy                # type-check
-uv run pre-commit install  # set up hooks
+uv sync                            # install runtime + dev deps into .venv
+uv run pytest                      # tests
+uv run ruff check                  # lint
+uv run ruff format                 # format
+uv run mypy                        # type-check
+uv run pip-audit --skip-editable   # CVE scan of locked deps
+uv run pre-commit install          # set up hooks
 ```
+
+Pre-commit runs `pip-audit` automatically whenever `pyproject.toml` or
+`uv.lock` change.
 
 ## License
 

@@ -31,3 +31,16 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+
+      # CVE scan via PyPA's pip-audit (queries the PyPI advisory DB).
+      # Scoped to dependency-changing files so day-to-day commits stay fast;
+      # run `uv run pip-audit --skip-editable` ad hoc to scan against the
+      # freshest advisory data without changing the lockfile.
+      # --skip-editable excludes the in-development zsnoop-mcp itself, which
+      # isn't yet on PyPI and so can't be looked up.
+      - id: pip-audit
+        name: pip-audit (CVE scan of locked deps)
+        entry: uv run pip-audit --skip-editable
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$

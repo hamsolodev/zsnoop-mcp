@@ -27,6 +27,20 @@ uv build
 unzip -l dist/zsnoop_mcp-*.whl   # confirm agent is in there
 ```
 
+CVE scan the locked dependency tree against the PyPI advisory database
+before publishing:
+
+```sh
+uv run pip-audit --skip-editable
+```
+
+This runs automatically in pre-commit whenever `pyproject.toml` or
+`uv.lock` change, but re-run it manually here — a vulnerability may have
+been published against an unchanged pinned dep since your last commit.
+Address findings by bumping the dep (`uv lock --upgrade-package <name>`)
+and re-running, or by acknowledging a specific advisory ID via
+`--ignore-vuln <ID>` with a note explaining why.
+
 Expected wheel layout:
 
 ```text
