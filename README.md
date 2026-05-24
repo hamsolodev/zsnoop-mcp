@@ -55,8 +55,11 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `list_hosts`           | Configured hosts                                         |
 | `agent_info`           | Agent version, methods, limits                           |
 | `list_pools`           | ZFS pools visible to the agent (live discovery)          |
+| `pool_status`          | Parsed `zpool status`: vdev tree, scrub, errors          |
 | `list_datasets`        | Filesystems and volumes                                  |
+| `dataset_properties`   | `zfs get` (all or filtered) with values + sources        |
 | `list_snapshots`       | Snapshots (optionally scoped to a dataset, recursive)    |
+| `snapshot_cadence`     | Snapshot inventory summary: counts by class, biggest gap |
 | `diff_snapshots`       | Path-level diff between two snapshots                    |
 | `list_dir`             | Bounded directory listing within a snapshot              |
 | `size_breakdown`       | Recursive bytes for a snapshot dir + per-child sizes     |

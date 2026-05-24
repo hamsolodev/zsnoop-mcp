@@ -321,6 +321,189 @@ def m_list_pools(_params: dict[str, Any]) -> dict[str, Any]:
     return {"pools": pools}
 
 
+_POOL_HEADER_RE: Final = re.compile(
+    r"^\s*(pool|state|status|action|see|scan|config|errors):\s?(.*)$",
+)
+# Validate pool names with the same character class as datasets (no '@', no '/').
+POOL_RE: Final = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$")
+# `zfs get -H -p -o name,property,value,source <selector> <dataset>` rows: 4 tab cols.
+_ZFS_GET_FIELDS: Final = 4
+# `zpool status` config-table rows: <name>  <state>  <read>  <write>  <cksum>.
+_VDEV_ROW_FIELDS: Final = 5
+
+
+def validate_pool(name: str) -> str:
+    if not isinstance(name, str) or not POOL_RE.match(name):
+        raise InvalidParams(f"invalid pool name: {name!r}")
+    return name
+
+
+def m_pool_status(params: dict[str, Any]) -> dict[str, Any]:
+    """Parsed ``zpool status`` for one pool or all pools.
+
+    Returns a structured view: per-pool ``state``, ``scan`` summary, vdev
+    tree with per-device error counts and depth, plus the raw multi-line
+    ``status``/``action`` messages when present. This is what you call
+    when ``list_pools`` shows HEALTH=DEGRADED and you want to know which
+    device.
+
+    If *pool* is omitted, returns every visible pool.
+    """
+    pool = params.get("pool")
+    args = ["status"]
+    if pool is not None:
+        validate_pool(pool)
+        args.append(pool)
+    out = run_zpool(args)
+    return {"pools": _parse_zpool_status(out)}
+
+
+def _parse_zpool_status(text: str) -> list[dict[str, Any]]:
+    """Parse `zpool status` output into a list of pool dicts.
+
+    Format is human-formatted text (no parseable mode in zpool); we
+    state-machine it. Pool blocks are separated by blank lines and
+    begin with ``  pool: <name>``.
+    """
+    pools: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    section: str | None = None  # "header" | "config" | "errors"
+    last_header_key: str | None = None
+    config_lines: list[str] = []
+
+    def _flush() -> None:
+        nonlocal current, config_lines
+        if current is None:
+            return
+        # Local capture so mypy keeps the narrowed type; closures can't
+        # rely on nonlocal narrowing surviving any later reassignment.
+        snap = current
+        if config_lines:
+            snap["vdevs"] = _parse_vdev_table(config_lines)
+        pools.append(snap)
+        current = None
+        config_lines = []
+
+    for line in text.splitlines():
+        stripped = line.rstrip()
+        if not stripped:
+            # Blank line — only meaningful as a section terminator inside
+            # the config block; otherwise just skip.
+            continue
+        header_match = _POOL_HEADER_RE.match(stripped)
+        if header_match:
+            key, value = header_match.group(1), header_match.group(2)
+            if key == "pool":
+                _flush()
+                current = {"name": value.strip()}
+                section = "header"
+                last_header_key = None
+                continue
+            if current is None:
+                continue
+            if key == "config":
+                section = "config"
+                last_header_key = None
+                continue
+            if key == "errors":
+                current["errors"] = value.strip()
+                section = "errors"
+                last_header_key = None
+                continue
+            # Plain header field (state/status/action/see/scan).
+            current[key] = value.strip()
+            last_header_key = key
+            continue
+        # Continuation: either a header continuation (indented) or a
+        # config-table row.
+        if section == "config":
+            config_lines.append(line)
+        elif section == "header" and last_header_key is not None:
+            # section == "header" is only ever set when we've opened a
+            # pool block, so current is non-None here. Assert to help mypy
+            # carry the narrowing across the closure boundary.
+            assert current is not None  # noqa: S101
+            current[last_header_key] = (current[last_header_key] + " " + stripped.strip()).strip()
+    _flush()
+    return pools
+
+
+def _parse_vdev_table(lines: list[str]) -> list[dict[str, Any]]:
+    """Parse the indented vdev tree under ``config:`` into a flat list.
+
+    Each row reports ``{name, state, read_errors, write_errors,
+    cksum_errors, depth}`` where *depth* is the indentation level
+    (0 = the pool itself, 1 = top-level vdev, 2 = device, etc.).
+    """
+    vdevs: list[dict[str, Any]] = []
+    base_indent: int | None = None
+    for raw in lines:
+        if not raw.strip():
+            continue
+        stripped = raw.rstrip()
+        leading = len(stripped) - len(stripped.lstrip())
+        parts = stripped.split()
+        if parts and parts[0] == "NAME":
+            base_indent = leading
+            continue
+        if base_indent is None:
+            # First non-blank, non-header row sets the baseline if there
+            # was no NAME header (e.g. a vendor-specific zpool variant).
+            base_indent = leading
+        if len(parts) < _VDEV_ROW_FIELDS:
+            continue
+        depth = max(0, (leading - base_indent) // 2)
+        vdevs.append(
+            {
+                "name": parts[0],
+                "state": parts[1],
+                "read_errors": _int_or_none(parts[2]),
+                "write_errors": _int_or_none(parts[3]),
+                "cksum_errors": _int_or_none(parts[4]),
+                "depth": depth,
+            },
+        )
+    return vdevs
+
+
+def m_dataset_properties(params: dict[str, Any]) -> dict[str, Any]:
+    """All ZFS properties for *dataset*, with values and sources.
+
+    Wraps ``zfs get -H -p -o name,property,value,source all <dataset>``,
+    returning every property visible to the agent's user. Use ``properties``
+    (a list of names) to fetch a specific subset instead of all.
+
+    Each entry: ``{name, value, source}`` where *source* is one of
+    ``default``, ``local``, ``inherited from <dataset>``, ``received``,
+    ``temporary``, ``-``.
+    """
+    dataset = validate_dataset(_require_str(params, "dataset"))
+    selector = "all"
+    requested = params.get("properties")
+    if requested is not None:
+        if not isinstance(requested, list) or not all(isinstance(p, str) for p in requested):
+            raise InvalidParams("properties must be a list of strings or null")
+        if not requested:
+            raise InvalidParams("properties list must be non-empty if given")
+        # Each property name is also validated through the dataset regex
+        # because zfs property names are lowercase letters / digits / : / -.
+        for p in requested:
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$", p):
+                raise InvalidParams(f"invalid property name: {p!r}")
+        selector = ",".join(requested)
+    out = run_zfs(["get", "-H", "-p", "-o", "name,property,value,source", selector, dataset])
+    properties: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < _ZFS_GET_FIELDS:
+            continue
+        _name, prop, value, source = parts[0], parts[1], parts[2], parts[3]
+        properties.append({"name": prop, "value": value, "source": source})
+    return {"dataset": dataset, "properties": properties}
+
+
 def m_list_datasets(_params: dict[str, Any]) -> dict[str, Any]:
     """List filesystems and volumes (excludes snapshots)."""
     out = run_zfs(
@@ -368,6 +551,91 @@ def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return {"snapshots": snaps}
+
+
+_AUTOSNAP_CLASS_RE: Final = re.compile(
+    r"zfs-auto-snap_(frequent|hourly|daily|weekly|monthly)\b",
+)
+
+
+def _snapshot_class(name: str) -> str:
+    """Classify *name* (snap part of `<dataset>@<snap>`) into a retention bucket.
+
+    Matches the conventional ``zfs-auto-snapshot`` and ``zrepl`` naming
+    schemes; unknown formats are bucketed as ``"other"`` so the caller
+    still sees them in the breakdown rather than silently dropping them.
+    """
+    m = _AUTOSNAP_CLASS_RE.search(name)
+    if m:
+        return m.group(1)
+    lower = name.lower()
+    for kw in ("frequent", "hourly", "daily", "weekly", "monthly"):
+        if kw in lower:
+            return kw
+    return "other"
+
+
+def m_snapshot_cadence(params: dict[str, Any]) -> dict[str, Any]:
+    """Summary stats for the snapshot inventory of one or all datasets.
+
+    Replaces the manual arithmetic of "I called ``list_snapshots`` and got
+    58 entries; what's the cadence, what's the retention window, are
+    there gaps?" with a single structured response.
+
+    If *dataset* is omitted, summarises every snapshot the agent can see
+    (i.e. across all datasets, treated as one population).
+    """
+    dataset = params.get("dataset")
+    if dataset is not None:
+        validate_dataset(dataset)
+    snaps = m_list_snapshots({"dataset": dataset} if dataset else {})["snapshots"]
+    by_class: dict[str, list[dict[str, Any]]] = {}
+    total_used = 0
+    for s in snaps:
+        bucket = _snapshot_class(s["snap"])
+        by_class.setdefault(bucket, []).append(s)
+        if s["used"] is not None:
+            total_used += s["used"]
+    breakdown: list[dict[str, Any]] = []
+    for cls in ("frequent", "hourly", "daily", "weekly", "monthly", "other"):
+        if cls not in by_class:
+            continue
+        group = by_class[cls]
+        creations = sorted(s["creation"] for s in group if s["creation"] is not None)
+        breakdown.append(
+            {
+                "class": cls,
+                "count": len(group),
+                "earliest_creation": creations[0] if creations else None,
+                "latest_creation": creations[-1] if creations else None,
+                "unique_bytes": sum(s["used"] or 0 for s in group),
+            },
+        )
+    # Overall: sorted creations across all snapshots.
+    all_creations = sorted(s["creation"] for s in snaps if s["creation"] is not None)
+    biggest_gap_seconds = None
+    biggest_gap_between: list[str] | None = None
+    # Need at least two timestamps to define a gap between them.
+    if len(all_creations) >= 2:  # noqa: PLR2004
+        gaps = [(all_creations[i] - all_creations[i - 1], i) for i in range(1, len(all_creations))]
+        gap_seconds, gap_idx = max(gaps)
+        biggest_gap_seconds = gap_seconds
+        # Recover the snapshot names at the boundary.
+        creation_to_name = {s["creation"]: s["name"] for s in snaps if s["creation"] is not None}
+        biggest_gap_between = [
+            creation_to_name[all_creations[gap_idx - 1]],
+            creation_to_name[all_creations[gap_idx]],
+        ]
+    return {
+        "dataset": dataset,
+        "total_snapshots": len(snaps),
+        "by_class": breakdown,
+        "earliest_creation": all_creations[0] if all_creations else None,
+        "latest_creation": all_creations[-1] if all_creations else None,
+        "biggest_gap_seconds": biggest_gap_seconds,
+        "biggest_gap_between": biggest_gap_between,
+        "total_unique_bytes": total_used,
+    }
 
 
 def m_diff_snapshots(params: dict[str, Any]) -> dict[str, Any]:
@@ -999,8 +1267,11 @@ def m_size_delta(params: dict[str, Any]) -> dict[str, Any]:
 METHODS: Final[dict[str, Any]] = {
     "agent_info": m_agent_info,
     "list_pools": m_list_pools,
+    "pool_status": m_pool_status,
     "list_datasets": m_list_datasets,
+    "dataset_properties": m_dataset_properties,
     "list_snapshots": m_list_snapshots,
+    "snapshot_cadence": m_snapshot_cadence,
     "diff_snapshots": m_diff_snapshots,
     "list_dir": m_list_dir,
     "size_breakdown": m_size_breakdown,

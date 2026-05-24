@@ -143,8 +143,11 @@ def test_methods_table_is_what_we_expect() -> None:
     expected = {
         "agent_info",
         "list_pools",
+        "pool_status",
         "list_datasets",
+        "dataset_properties",
         "list_snapshots",
+        "snapshot_cadence",
         "diff_snapshots",
         "list_dir",
         "size_breakdown",

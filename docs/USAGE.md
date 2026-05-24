@@ -108,6 +108,30 @@ free, health), then `list_datasets(host="r2d2")` for filesystems and
 volumes. The static `pools` field in the host config is just a hint — call
 `list_pools` for the live truth.
 
+> "Is the rpool on r2d2 healthy? Last scrub status?"
+
+`pool_status(host="r2d2", pool="rpool")` returns the parsed `zpool status`
+output: pool state, `scan` summary (last scrub result + when), vdev tree
+with per-device read/write/checksum error counts and depth (0=pool, 1=
+top-level vdev, 2=leaf device). Call this when `list_pools` shows
+HEALTH=DEGRADED to find out *which* device.
+
+> "What's the compression / atime / recordsize on `rpool/home/youruser`?"
+
+`dataset_properties(host="r2d2", dataset="rpool/home/youruser", properties=
+["compression", "atime", "recordsize", "compressratio"])` returns each
+property's value and source (`local`, `inherited from rpool`, `default`,
+…). Omit `properties` to fetch the full `zfs get all` set.
+
+> "Is `rpool/home/youruser` being snapshotted as expected?"
+
+`snapshot_cadence(host="r2d2", dataset="rpool/home/youruser")` summarises
+the snapshot inventory: counts bucketed by retention class (frequent /
+hourly / daily / weekly / monthly / other), earliest/latest creation,
+biggest gap (with the two snapshot names that frame it), and total
+unique bytes. Faster than walking `list_snapshots` and doing arithmetic
+on a long response.
+
 ## Cross-cutting tips for the LLM
 
 - Time-range parameters (`after`, `before`) accept ISO 8601 *or* phrases like

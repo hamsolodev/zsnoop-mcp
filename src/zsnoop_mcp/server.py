@@ -82,17 +82,70 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         return await _call(host, "list_pools")
 
     @mcp.tool()
+    async def pool_status(host: str, pool: str | None = None) -> dict[str, Any]:
+        """Parsed ``zpool status`` for one pool or all pools on `host`.
+
+        Returns ``{pools: [{name, state, scan, status?, action?, see?,
+        errors, vdevs: [{name, state, read_errors, write_errors,
+        cksum_errors, depth}]}]}``. ``depth`` reflects the vdev tree
+        indentation: 0 = pool, 1 = top-level vdev (mirror, raidz, …),
+        2 = device. Call this when ``list_pools`` shows a non-ONLINE
+        health to find out *which* device.
+        """
+        return await _call(host, "pool_status", {"pool": pool} if pool else None)
+
+    @mcp.tool()
     async def list_datasets(host: str) -> dict[str, Any]:
         """List ZFS filesystems and volumes on `host` (no snapshots)."""
         return await _call(host, "list_datasets")
+
+    @mcp.tool()
+    async def dataset_properties(
+        host: str,
+        dataset: str,
+        properties: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """All ZFS properties for `dataset` (or a chosen subset).
+
+        Returns ``{dataset, properties: [{name, value, source}]}`` where
+        *source* is ``default`` / ``local`` / ``inherited from <dataset>``
+        / ``received`` / ``temporary`` / ``-``. Pass ``properties`` to
+        fetch only specific names (e.g. ``["compression", "atime",
+        "recordsize"]``); omit it for the full set.
+
+        Use this for "why is this dataset behaving like that?" — quota,
+        compression ratio, atime, recordsize, mountpoint, encryption,
+        canmount, etc. are all here.
+        """
+        params: dict[str, Any] = {"dataset": dataset}
+        if properties is not None:
+            params["properties"] = properties
+        return await _call(host, "dataset_properties", params)
 
     @mcp.tool()
     async def list_snapshots(host: str, dataset: str | None = None) -> dict[str, Any]:
         """List ZFS snapshots on `host`, optionally scoped to `dataset` (recursive).
 
         Each snapshot reports its creation time as a Unix timestamp.
+        For aggregate summary statistics (counts by retention class,
+        biggest gap, total unique bytes), prefer ``snapshot_cadence``.
         """
         return await _call(host, "list_snapshots", {"dataset": dataset} if dataset else None)
+
+    @mcp.tool()
+    async def snapshot_cadence(host: str, dataset: str | None = None) -> dict[str, Any]:
+        """Summary statistics for the snapshot inventory on `host`.
+
+        Returns ``{total_snapshots, by_class, earliest_creation,
+        latest_creation, biggest_gap_seconds, biggest_gap_between,
+        total_unique_bytes}``. ``by_class`` buckets snapshots by
+        retention category (frequent / hourly / daily / weekly / monthly
+        / other) based on standard ``zfs-auto-snapshot`` naming. Use it
+        to answer "is this dataset being snapshotted as expected?" or
+        "what's the retention window?" without doing arithmetic on a
+        long ``list_snapshots`` response.
+        """
+        return await _call(host, "snapshot_cadence", {"dataset": dataset} if dataset else None)
 
     @mcp.tool()
     async def diff_snapshots(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:

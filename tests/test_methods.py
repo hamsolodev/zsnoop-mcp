@@ -130,6 +130,216 @@ def test_list_snapshots_rejects_invalid_dataset(fake_zfs: FakeZfs) -> None:
         agent.m_list_snapshots({"dataset": "rpool;rm"})
 
 
+# ---- dataset_properties ----------------------------------------------------
+
+
+def test_dataset_properties_returns_all_when_unfiltered(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        ["get", "-H", "-p", "-o", "name,property,value,source", "all", "rpool/home"],
+        "rpool/home\tcompression\tlz4\tinherited from rpool\n"
+        "rpool/home\tatime\toff\tlocal\n"
+        "rpool/home\tcompressratio\t1.45x\t-\n",
+    )
+    result = agent.m_dataset_properties({"dataset": "rpool/home"})
+    props = {p["name"]: p for p in result["properties"]}
+    assert props["compression"]["value"] == "lz4"
+    assert props["compression"]["source"] == "inherited from rpool"
+    assert props["atime"]["source"] == "local"
+    assert props["compressratio"]["source"] == "-"
+
+
+def test_dataset_properties_filtered(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        ["get", "-H", "-p", "-o", "name,property,value,source", "compression,atime", "rpool/home"],
+        "rpool/home\tcompression\tzstd\tlocal\nrpool/home\tatime\ton\tdefault\n",
+    )
+    result = agent.m_dataset_properties(
+        {"dataset": "rpool/home", "properties": ["compression", "atime"]},
+    )
+    assert len(result["properties"]) == 2
+
+
+def test_dataset_properties_rejects_bad_property_name() -> None:
+    with pytest.raises(agent.InvalidParams, match="invalid property name"):
+        agent.m_dataset_properties(
+            {"dataset": "rpool/home", "properties": ["compression;rm"]},
+        )
+
+
+def test_dataset_properties_rejects_empty_properties_list() -> None:
+    with pytest.raises(agent.InvalidParams, match="non-empty"):
+        agent.m_dataset_properties({"dataset": "rpool/home", "properties": []})
+
+
+# ---- pool_status -----------------------------------------------------------
+
+
+_ZPOOL_STATUS_HEALTHY = """\
+  pool: rpool
+ state: ONLINE
+  scan: scrub repaired 0B in 02:34:56 with 0 errors on Sun May 18 03:34:56 2025
+config:
+
+\tNAME        STATE     READ WRITE CKSUM
+\trpool       ONLINE       0     0     0
+\t  mirror-0  ONLINE       0     0     0
+\t    sda     ONLINE       0     0     0
+\t    sdb     ONLINE       0     0     0
+
+errors: No known data errors
+"""
+
+_ZPOOL_STATUS_DEGRADED = """\
+  pool: tank
+ state: DEGRADED
+status: One or more devices has experienced an unrecoverable error.  An
+\tattempt was made to correct the error.  Applications are unaffected.
+action: Determine if the device needs to be replaced, and clear the errors
+\tusing 'zpool clear' or replace the device with 'zpool replace'.
+   see: http://zfsonlinux.org/msg/ZFS-8000-9P
+  scan: scrub repaired 4K in 01:00:00 with 0 errors on Sun May 18 04:00:00 2025
+config:
+
+\tNAME        STATE     READ WRITE CKSUM
+\ttank        DEGRADED     0     0     0
+\t  mirror-0  DEGRADED     0     0     0
+\t    sdc     ONLINE       0     0     0
+\t    sdd     FAULTED      3     0     5
+
+errors: No known data errors
+"""
+
+
+def test_pool_status_parses_healthy_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        agent, "run_zpool", lambda args: _ZPOOL_STATUS_HEALTHY if args == ["status"] else ""
+    )
+    result = agent.m_pool_status({})
+    assert len(result["pools"]) == 1
+    pool = result["pools"][0]
+    assert pool["name"] == "rpool"
+    assert pool["state"] == "ONLINE"
+    assert "scrub repaired 0B" in pool["scan"]
+    assert pool["errors"] == "No known data errors"
+    vdev_names = [v["name"] for v in pool["vdevs"]]
+    assert vdev_names == ["rpool", "mirror-0", "sda", "sdb"]
+    depths = {v["name"]: v["depth"] for v in pool["vdevs"]}
+    assert depths == {"rpool": 0, "mirror-0": 1, "sda": 2, "sdb": 2}
+
+
+def test_pool_status_parses_degraded_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        agent, "run_zpool", lambda args: _ZPOOL_STATUS_DEGRADED if args == ["status"] else ""
+    )
+    result = agent.m_pool_status({})
+    pool = result["pools"][0]
+    assert pool["state"] == "DEGRADED"
+    assert "unrecoverable error" in pool["status"]
+    # Multi-line continuation got joined.
+    assert "Applications are unaffected" in pool["status"]
+    # Faulted device's error counts surfaced.
+    sdd = next(v for v in pool["vdevs"] if v["name"] == "sdd")
+    assert sdd["state"] == "FAULTED"
+    assert sdd["read_errors"] == 3
+    assert sdd["cksum_errors"] == 5
+
+
+def test_pool_status_scoped_to_one_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake(args: list[str]) -> str:
+        seen.append(args)
+        return _ZPOOL_STATUS_HEALTHY
+
+    monkeypatch.setattr(agent, "run_zpool", fake)
+    agent.m_pool_status({"pool": "rpool"})
+    assert seen == [["status", "rpool"]]
+
+
+def test_pool_status_rejects_invalid_pool_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent, "run_zpool", lambda args: "")
+    with pytest.raises(agent.InvalidParams, match="invalid pool name"):
+        agent.m_pool_status({"pool": "rpool;rm -rf /"})
+
+
+# ---- snapshot_cadence ------------------------------------------------------
+
+
+def test_snapshot_cadence_classifies_by_retention(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "rpool/home",
+        ],
+        "rpool/home@zfs-auto-snap_daily-2026-05-20-2025\t1779308715\t100\t1000\n"
+        "rpool/home@zfs-auto-snap_daily-2026-05-21-2025\t1779395115\t200\t1000\n"
+        "rpool/home@zfs-auto-snap_hourly-2026-05-22-0117\t1779453437\t50\t1000\n"
+        "rpool/home@zfs-auto-snap_weekly-2026-05-16-2047\t1778964434\t0\t1000\n"
+        "rpool/home@manual-before-upgrade\t1779000000\t999\t1000\n",
+    )
+    result = agent.m_snapshot_cadence({"dataset": "rpool/home"})
+    assert result["total_snapshots"] == 5
+    by_class = {b["class"]: b for b in result["by_class"]}
+    assert by_class["daily"]["count"] == 2
+    assert by_class["hourly"]["count"] == 1
+    assert by_class["weekly"]["count"] == 1
+    assert by_class["other"]["count"] == 1  # the manual snap
+    assert result["total_unique_bytes"] == 100 + 200 + 50 + 0 + 999
+
+
+def test_snapshot_cadence_reports_biggest_gap(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "rpool/home",
+        ],
+        # 100, 200 (gap 100), 1000 (gap 800 <- biggest), 1050 (gap 50)
+        "rpool/home@a\t100\t0\t0\n"
+        "rpool/home@b\t200\t0\t0\n"
+        "rpool/home@c\t1000\t0\t0\n"
+        "rpool/home@d\t1050\t0\t0\n",
+    )
+    result = agent.m_snapshot_cadence({"dataset": "rpool/home"})
+    assert result["biggest_gap_seconds"] == 800
+    assert result["biggest_gap_between"] == ["rpool/home@b", "rpool/home@c"]
+
+
+def test_snapshot_cadence_empty_dataset(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "rpool/empty",
+        ],
+        "",
+    )
+    result = agent.m_snapshot_cadence({"dataset": "rpool/empty"})
+    assert result["total_snapshots"] == 0
+    assert result["earliest_creation"] is None
+    assert result["biggest_gap_seconds"] is None
+    assert result["by_class"] == []
+
+
 # ---- diff_snapshots ---------------------------------------------------------
 
 

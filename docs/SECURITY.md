@@ -42,8 +42,9 @@ The agent dispatches RPCs through an **explicit `METHODS` allowlist** in
 `agent/zfs_snoop_agent.py`. Any method not in the dict returns JSON-RPC
 `Method not found` (-32601).
 
-Allowlist (read-only): `agent_info`, `list_pools`, `list_datasets`,
-`list_snapshots`, `diff_snapshots`, `list_dir`, `size_breakdown`,
+Allowlist (read-only): `agent_info`, `list_pools`, `pool_status`,
+`list_datasets`, `dataset_properties`, `list_snapshots`,
+`snapshot_cadence`, `diff_snapshots`, `list_dir`, `size_breakdown`,
 `read_file`, `find_files`, `content_grep`, `file_history`, `versions_of`,
 `file_diff`, `snapshots_containing`, `first_appearance`,
 `last_appearance`, `find_deleted`, `size_delta`.
