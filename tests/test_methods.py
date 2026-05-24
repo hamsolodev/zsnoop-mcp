@@ -871,3 +871,249 @@ def test_size_delta_rejects_cross_dataset(fake_zfs: FakeZfs) -> None:
         agent.m_size_delta(
             {"snap_a": "rpool/home@a", "snap_b": "rpool/etc@b"},
         )
+
+
+# ---- top_consumers ---------------------------------------------------------
+
+
+def test_top_consumers_returns_largest_first(mock_mountpoint: dict[str, Any]) -> None:
+    result = agent.m_top_consumers(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "", "n": 3},
+    )
+    # Sorted descending by bytes.
+    sizes = [e["bytes"] for e in result["entries"]]
+    assert sizes == sorted(sizes, reverse=True)
+    # big.bin (~1.14 MiB) is by far the biggest single file.
+    biggest = result["entries"][0]
+    assert "big.bin" in biggest["path"]
+
+
+def test_top_consumers_includes_dirs_with_subtree_total(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    result = agent.m_top_consumers(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "", "n": 10},
+    )
+    by_path = {e["path"]: e for e in result["entries"]}
+    # The "sub" dir should appear, with bytes including nested.txt + symlink.
+    sub_entry = by_path.get("sub")
+    assert sub_entry is not None
+    assert sub_entry["type"] == "dir"
+    assert sub_entry["bytes"] >= len("nested content\n")
+
+
+def test_top_consumers_rejects_non_directory(mock_mountpoint: dict[str, Any]) -> None:
+    with pytest.raises(agent.PathError, match="not a directory"):
+        agent.m_top_consumers(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "hello.txt"},
+        )
+
+
+def test_top_consumers_truncates_on_entry_budget(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    result = agent.m_top_consumers(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "", "max_entries": 1, "n": 10},
+    )
+    assert result["truncated"] is True
+    assert result["walked_entries"] == 1
+
+
+# ---- stale_snapshots -------------------------------------------------------
+
+
+def test_stale_snapshots_filters_by_cutoff(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "rpool/home",
+        ],
+        "rpool/home@old1\t100\t500\t1000\n"
+        "rpool/home@old2\t200\t1500\t1000\n"  # biggest used, should sort first
+        "rpool/home@new\t9000\t10\t1000\n",
+    )
+    result = agent.m_stale_snapshots(
+        {"dataset": "rpool/home", "older_than": "1970-01-01T00:50:00+00:00"},
+    )
+    # 'new' is after cutoff (9000 > 3000), 'old1' and 'old2' before.
+    # Wait: cutoff is 50 minutes after epoch (3000s). old1=100, old2=200 are
+    # both before. new=9000 is after.
+    names = [s["name"] for s in result["snapshots"]]
+    assert names == ["rpool/home@old2", "rpool/home@old1"]  # sorted by used desc
+
+
+def test_stale_snapshots_truncated_flag(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "rpool/home",
+        ],
+        "rpool/home@a\t100\t1\t1\nrpool/home@b\t200\t2\t1\nrpool/home@c\t300\t3\t1\n",
+    )
+    result = agent.m_stale_snapshots(
+        {"dataset": "rpool/home", "older_than": "1970-01-01T01:00:00+00:00", "max_results": 2},
+    )
+    assert len(result["snapshots"]) == 2
+    assert result["truncated"] is True
+
+
+def test_stale_snapshots_rejects_missing_older_than() -> None:
+    with pytest.raises(agent.InvalidParams):
+        agent.m_stale_snapshots({"dataset": "rpool/home"})
+
+
+# ---- bisect_change ---------------------------------------------------------
+
+
+def _setup_multi_snap(fake_zfs: FakeZfs, tree: dict[str, Any], snaps: list[str]) -> None:
+    """Wire fake_zfs.add for list_snapshots + mountpoint across *snaps*."""
+    rows = []
+    for i, snap in enumerate(snaps):
+        rows.append(f"testpool/test@{snap}\t{1000 + i * 100}\t10\t1000\n")
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "testpool/test",
+        ],
+        "".join(rows),
+    )
+    fake_zfs.add(
+        ["get", "-H", "-p", "-o", "value", "mountpoint", "testpool/test"],
+        f"{tree['mountpoint']}\n",
+    )
+
+
+def test_bisect_change_no_transition_when_both_ends_agree(
+    snapshot_tree: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """Both ends have the file present; predicate flat-true; no transition."""
+    snap2_root = snapshot_tree["mountpoint"] / ".zfs" / "snapshot" / "snap2"
+    snap2_root.mkdir()
+    (snap2_root / "hello.txt").write_text("hello, world!\n")
+    _setup_multi_snap(fake_zfs, snapshot_tree, ["snap1", "snap2"])
+    result = agent.m_bisect_change(
+        {"dataset": "testpool/test", "path": "hello.txt", "predicate": {"kind": "exists"}},
+    )
+    assert result["transition"] is None
+    assert result["earliest_value"] is True
+    assert result["latest_value"] is True
+
+
+def test_bisect_change_finds_exists_transition(
+    snapshot_tree: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """snap1 has hello.txt, snap2 does not — bisect locates the transition."""
+    snap2_root = snapshot_tree["mountpoint"] / ".zfs" / "snapshot" / "snap2"
+    snap2_root.mkdir()
+    # Empty snap2: file went away.
+    _setup_multi_snap(fake_zfs, snapshot_tree, ["snap1", "snap2"])
+    result = agent.m_bisect_change(
+        {"dataset": "testpool/test", "path": "hello.txt", "predicate": {"kind": "exists"}},
+    )
+    assert result["transition"] is not None
+    assert result["transition"]["from_snapshot"] == "testpool/test@snap1"
+    assert result["transition"]["to_snapshot"] == "testpool/test@snap2"
+    assert result["transition"]["from_value"] is True
+    assert result["transition"]["to_value"] is False
+
+
+def test_bisect_change_contains_predicate(
+    snapshot_tree: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """contains needle only appears in snap2 → transition between snap1 and snap2."""
+    snap2_root = snapshot_tree["mountpoint"] / ".zfs" / "snapshot" / "snap2"
+    snap2_root.mkdir()
+    (snap2_root / "hello.txt").write_text("hello, world!\nINJECTED BUG MARKER\n")
+    _setup_multi_snap(fake_zfs, snapshot_tree, ["snap1", "snap2"])
+    result = agent.m_bisect_change(
+        {
+            "dataset": "testpool/test",
+            "path": "hello.txt",
+            "predicate": {"kind": "contains", "needle": "INJECTED BUG MARKER"},
+        },
+    )
+    assert result["transition"]["from_value"] is False
+    assert result["transition"]["to_value"] is True
+
+
+def test_bisect_change_validates_predicate_shape() -> None:
+    with pytest.raises(agent.InvalidParams, match="kind"):
+        agent.m_bisect_change(
+            {"dataset": "rpool/home", "path": "x", "predicate": {"kind": "blender"}},
+        )
+    with pytest.raises(agent.InvalidParams, match="non-empty 'needle'"):
+        agent.m_bisect_change(
+            {"dataset": "rpool/home", "path": "x", "predicate": {"kind": "contains", "needle": ""}},
+        )
+    with pytest.raises(agent.InvalidParams, match="64-hex"):
+        agent.m_bisect_change(
+            {
+                "dataset": "rpool/home",
+                "path": "x",
+                "predicate": {"kind": "sha256_equals", "hash": "deadbeef"},
+            },
+        )
+    with pytest.raises(agent.InvalidParams, match="non-negative int"):
+        agent.m_bisect_change(
+            {
+                "dataset": "rpool/home",
+                "path": "x",
+                "predicate": {"kind": "size_at_least", "size": -1},
+            },
+        )
+
+
+def test_bisect_change_size_at_least_predicate(
+    snapshot_tree: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """snap1's hello.txt is short; snap2's is long. size_at_least 50 transitions."""
+    snap2_root = snapshot_tree["mountpoint"] / ".zfs" / "snapshot" / "snap2"
+    snap2_root.mkdir()
+    (snap2_root / "hello.txt").write_text("x" * 100)  # longer than 50 bytes
+    _setup_multi_snap(fake_zfs, snapshot_tree, ["snap1", "snap2"])
+    result = agent.m_bisect_change(
+        {
+            "dataset": "testpool/test",
+            "path": "hello.txt",
+            "predicate": {"kind": "size_at_least", "size": 50},
+        },
+    )
+    assert result["transition"]["from_value"] is False
+    assert result["transition"]["to_value"] is True
+
+
+def test_bisect_change_returns_no_transition_with_single_snapshot(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    _setup_history_fake(fake_zfs, mock_mountpoint)
+    result = agent.m_bisect_change(
+        {"dataset": "testpool/test", "path": "hello.txt", "predicate": {"kind": "exists"}},
+    )
+    assert result["transition"] is None
+    assert "at least two snapshots" in result["reason"]

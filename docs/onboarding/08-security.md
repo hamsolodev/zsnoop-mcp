@@ -77,6 +77,9 @@ symlink at all. Tests:
 | `file_diff` | `max_bytes` per side, default 1 MiB, capped at 4 MiB |
 | `versions_of` | `max_bytes` per snapshot, default 1 MiB, capped at 4 MiB |
 | `find_deleted` | `max_results`, default 1000, capped at 10 000 |
+| `top_consumers` | heap `n`, default 20, capped at 1000; same walk cap + 30 s wall time as `size_breakdown` |
+| `stale_snapshots` | `max_results`, default 1000, capped at 10 000 |
+| `bisect_change` | `max_bytes` per predicate read, default 1 MiB, capped at 4 MiB; visits O(log N) snapshots |
 | Per `zfs` subprocess | 30 s wall time |
 | Transport recv | 60 s wall time |
 

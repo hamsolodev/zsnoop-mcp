@@ -88,6 +88,7 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "diff_snapshots",
         "list_dir",
         "size_breakdown",
+        "top_consumers",
         "read_file",
         "find_files",
         "content_grep",
@@ -98,6 +99,8 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "first_appearance",
         "last_appearance",
         "find_deleted",
+        "bisect_change",
+        "stale_snapshots",
         "size_delta",
     }
 

@@ -20,6 +20,7 @@ import base64
 import difflib
 import fnmatch
 import hashlib
+import heapq
 import json
 import logging
 import os
@@ -73,6 +74,18 @@ DEFAULT_VERSION_HASH_BYTES: Final = 1 * 1024 * 1024
 # cap shape as read_file because the underlying read is the same operation.
 MAX_DIFF_BYTES: Final = 4 * 1024 * 1024
 DEFAULT_DIFF_BYTES: Final = 1 * 1024 * 1024
+# `top_consumers` keeps the N largest entries seen during a bounded walk.
+# The walk itself reuses the size_breakdown entry budget; N is just the
+# heap size.
+MAX_TOP_CONSUMERS: Final = 1_000
+DEFAULT_TOP_CONSUMERS: Final = 20
+# `stale_snapshots` returns at most this many entries per call.
+MAX_STALE_RESULTS: Final = 10_000
+DEFAULT_STALE_RESULTS: Final = 1_000
+# `bisect_change` evaluates predicates that may read file content; this
+# bounds the per-evaluation read.
+MAX_BISECT_BYTES: Final = 4 * 1024 * 1024
+DEFAULT_BISECT_BYTES: Final = 1 * 1024 * 1024
 
 # Subprocess wall-clock timeout for any single zfs invocation.
 ZFS_TIMEOUT_SECONDS: Final = 30.0
@@ -277,6 +290,9 @@ class Limits:
     max_deleted_results: int = MAX_DELETED_RESULTS
     max_version_hash_bytes: int = MAX_VERSION_HASH_BYTES
     max_diff_bytes: int = MAX_DIFF_BYTES
+    max_top_consumers: int = MAX_TOP_CONSUMERS
+    max_stale_results: int = MAX_STALE_RESULTS
+    max_bisect_bytes: int = MAX_BISECT_BYTES
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
 
@@ -295,6 +311,9 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_deleted_results": MAX_DELETED_RESULTS,
             "max_version_hash_bytes": MAX_VERSION_HASH_BYTES,
             "max_diff_bytes": MAX_DIFF_BYTES,
+            "max_top_consumers": MAX_TOP_CONSUMERS,
+            "max_stale_results": MAX_STALE_RESULTS,
+            "max_bisect_bytes": MAX_BISECT_BYTES,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
         },
@@ -818,6 +837,335 @@ def m_size_breakdown(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class _TopHeap:
+    """Bounded top-N heap used by :func:`m_top_consumers`.
+
+    Stores ``(bytes, counter, payload)`` so dicts are never compared by
+    heapq when two entries have the same byte size.
+    """
+
+    def __init__(self, n: int, root: Path) -> None:
+        self._n = n
+        self._root = root
+        self._heap: list[tuple[int, int, dict[str, Any]]] = []
+        self._counter = 0
+
+    def push(self, entry_path: Path, kind: str, byte_count: int) -> None:
+        try:
+            rel = entry_path.relative_to(self._root)
+        except ValueError:
+            rel = entry_path
+        item = {"path": str(rel), "type": kind, "bytes": byte_count}
+        if len(self._heap) < self._n:
+            heapq.heappush(self._heap, (byte_count, self._counter, item))
+        elif byte_count > self._heap[0][0]:
+            heapq.heapreplace(self._heap, (byte_count, self._counter, item))
+        self._counter += 1
+
+    def sorted(self) -> list[dict[str, Any]]:
+        return [item for _b, _c, item in sorted(self._heap, key=lambda x: x[0], reverse=True)]
+
+
+def _walk_for_top_consumers(
+    dir_path: Path,
+    heap: _TopHeap,
+    budget: list[int],
+    deadline: float,
+) -> tuple[int, bool]:
+    """Walk *dir_path*, push every entry into *heap*, return ``(bytes, truncated)``.
+
+    Iterates lstat-style (G3 — never follows symlinks). The dir's own
+    inode size is added to the returned subtree total to match ``du``
+    semantics.
+    """
+    subtree_total = 0
+    if budget[0] <= 0 or time.monotonic() >= deadline:
+        return subtree_total, True
+    try:
+        it = os.scandir(dir_path)
+    except OSError:
+        return subtree_total, False
+    truncated = False
+    with it:
+        for entry in it:
+            if budget[0] <= 0 or time.monotonic() >= deadline:
+                truncated = True
+                break
+            budget[0] -= 1
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            mode = st.st_mode
+            if stat_mod.S_ISDIR(mode):
+                sub_bytes, sub_trunc = _walk_for_top_consumers(
+                    Path(entry.path),
+                    heap,
+                    budget,
+                    deadline,
+                )
+                dir_total = st.st_size + sub_bytes
+                heap.push(Path(entry.path), "dir", dir_total)
+                subtree_total += dir_total
+                if sub_trunc:
+                    truncated = True
+            else:
+                kind = (
+                    "symlink"
+                    if stat_mod.S_ISLNK(mode)
+                    else "file"
+                    if stat_mod.S_ISREG(mode)
+                    else "other"
+                )
+                heap.push(Path(entry.path), kind, st.st_size)
+                subtree_total += st.st_size
+    return subtree_total, truncated
+
+
+def m_top_consumers(params: dict[str, Any]) -> dict[str, Any]:
+    """Top-N largest files and directories within a snapshot subtree.
+
+    Walks the subtree bounded by ``max_entries`` (same as ``size_breakdown``)
+    and keeps a heap of the *N* largest entries seen. For directories, the
+    reported ``bytes`` is the recursive subtree sum (so the result is like
+    ``du -ab | sort -rn | head -n``, minus the request path itself).
+
+    Use after ``size_breakdown`` once you've identified a big subtree:
+    ``size_breakdown`` says "here's how the children split"; this says
+    "here are the specific files and dirs hogging space, ranked".
+    Symlinks are counted by their own lstat size and never followed (G3).
+    """
+    snapshot = _require_str(params, "snapshot")
+    path = _require_str(params, "path")
+    n = validate_positive_int(
+        params.get("n"),
+        name="n",
+        default=DEFAULT_TOP_CONSUMERS,
+        hard_max=MAX_TOP_CONSUMERS,
+    )
+    max_entries = validate_positive_int(
+        params.get("max_entries"),
+        name="max_entries",
+        default=DEFAULT_SIZE_WALK_ENTRIES,
+        hard_max=MAX_SIZE_WALK_ENTRIES,
+    )
+    _, target = resolve_under_snapshot(snapshot, path)
+    if not target.is_dir():
+        raise PathError(f"not a directory: {path!r}")
+    deadline = time.monotonic() + SIZE_WALK_TIMEOUT_SECONDS
+    budget = [max_entries]
+    heap = _TopHeap(n, target.resolve())
+    _bytes, truncated = _walk_for_top_consumers(target, heap, budget, deadline)
+    return {
+        "snapshot": snapshot,
+        "path": path,
+        "entries": heap.sorted(),
+        "walked_entries": max_entries - budget[0],
+        "truncated": truncated,
+    }
+
+
+def m_stale_snapshots(params: dict[str, Any]) -> dict[str, Any]:
+    """Snapshots older than ``older_than``, sorted by unique bytes used.
+
+    Resolves ``older_than`` (ISO 8601 or a human phrase like
+    ``"6 months ago"``) to a Unix timestamp and returns the snapshots
+    whose creation predates it. Sort order is descending ``used`` —
+    the biggest-by-unique-bytes appear first, which is what you want
+    when deciding what to cull.
+
+    Scoped to *dataset* if given, else covers every visible snapshot.
+    Bounded by ``max_results`` (default 1000, capped at 10 000).
+    """
+    dataset = params.get("dataset")
+    if dataset is not None:
+        validate_dataset(dataset)
+    older_than = _require_str(params, "older_than")
+    older_than_ts = _iso_to_ts(older_than, name="older_than")
+    if older_than_ts is None:
+        raise InvalidParams("older_than must be a non-null ISO 8601 string")
+    max_results = validate_positive_int(
+        params.get("max_results"),
+        name="max_results",
+        default=DEFAULT_STALE_RESULTS,
+        hard_max=MAX_STALE_RESULTS,
+    )
+    snaps = m_list_snapshots({"dataset": dataset} if dataset else {})["snapshots"]
+    stale = [s for s in snaps if s["creation"] is not None and s["creation"] < older_than_ts]
+    stale.sort(key=lambda s: s["used"] or 0, reverse=True)
+    truncated = len(stale) > max_results
+    return {
+        "dataset": dataset,
+        "older_than_unix": older_than_ts,
+        "snapshots": stale[:max_results],
+        "truncated": truncated,
+    }
+
+
+# `bisect_change` predicate kinds. Validated at the dispatch boundary so a
+# malformed predicate fails fast rather than mid-search.
+_PREDICATE_KINDS: Final = frozenset(
+    {
+        "exists",
+        "contains",
+        "sha256_equals",
+        "size_at_least",
+    }
+)
+
+
+def _validate_predicate(pred: object) -> dict[str, Any]:
+    if not isinstance(pred, dict) or "kind" not in pred:
+        raise InvalidParams("predicate must be a dict with a 'kind' field")
+    kind = pred["kind"]
+    if kind not in _PREDICATE_KINDS:
+        raise InvalidParams(
+            f"predicate kind must be one of {sorted(_PREDICATE_KINDS)}, got {kind!r}",
+        )
+    if kind == "contains":
+        if not isinstance(pred.get("needle"), str) or not pred["needle"]:
+            raise InvalidParams("predicate 'contains' requires non-empty 'needle' string")
+    elif kind == "sha256_equals":
+        h = pred.get("hash")
+        if not isinstance(h, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", h):
+            raise InvalidParams("predicate 'sha256_equals' requires 64-hex-char 'hash'")
+    elif kind == "size_at_least":
+        size = pred.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise InvalidParams("predicate 'size_at_least' requires non-negative int 'size'")
+    return pred
+
+
+def _stat_regular_in_snapshot(snap: str, path: str) -> os.stat_result | None:
+    """lstat *path* in *snap*; return the stat result iff it's a regular file."""
+    try:
+        _, target = resolve_under_snapshot(snap, path)
+        st = target.lstat()
+    except (PathError, ZfsError, OSError):
+        return None
+    if not stat_mod.S_ISREG(st.st_mode):
+        return None
+    return st
+
+
+def _eval_predicate(snap: str, path: str, pred: dict[str, Any], max_bytes: int) -> bool:
+    """Evaluate *pred* against the version of *path* in *snap*."""
+    kind = pred["kind"]
+    if kind == "exists":
+        return _stat_regular_in_snapshot(snap, path) is not None
+    if kind == "size_at_least":
+        st = _stat_regular_in_snapshot(snap, path)
+        return st is not None and st.st_size >= pred["size"]
+    # Both 'contains' and 'sha256_equals' need bytes.
+    side = _read_for_diff(snap, path, max_bytes)
+    data = side["data"]
+    if data is None:
+        return False
+    if kind == "contains":
+        return pred["needle"].encode("utf-8") in data
+    if kind == "sha256_equals":
+        expected_hash: str = pred["hash"]
+        return hashlib.sha256(data).hexdigest().lower() == expected_hash.lower()
+    raise InvalidParams(f"unknown predicate kind: {kind!r}")
+
+
+def m_bisect_change(params: dict[str, Any]) -> dict[str, Any]:
+    """Binary-search snapshots of *dataset* for the snapshot where the
+    predicate against *path* flips its value.
+
+    Evaluates the predicate at the earliest and latest snapshots; if
+    they agree, returns ``transition: null`` (no flip in window). If
+    they disagree, performs a binary search, calling the predicate
+    O(log N) times, and returns the snapshot pair on either side of
+    the transition.
+
+    Useful for "when did /etc/foo.conf first contain BUG?" or "when
+    did the file first exceed 100 KB?". Predicate shapes:
+
+    - ``{"kind": "exists"}`` — file is a regular file
+    - ``{"kind": "contains", "needle": "..."}`` — UTF-8 substring in first ``max_bytes``
+    - ``{"kind": "sha256_equals", "hash": "<64-hex>"}`` — SHA-256 of first ``max_bytes``
+    - ``{"kind": "size_at_least", "size": N}`` — file size >= N
+
+    Bisect assumes the predicate is *monotonic* across the snapshot
+    sequence (flips at most once). If it isn't, the returned transition
+    is one of possibly many; the result is well-defined but may not be
+    the "right" one for the caller's intent.
+    """
+    dataset = validate_dataset(_require_str(params, "dataset"))
+    path = _require_str(params, "path")
+    predicate = _validate_predicate(params.get("predicate"))
+    max_bytes = validate_positive_int(
+        params.get("max_bytes"),
+        name="max_bytes",
+        default=DEFAULT_BISECT_BYTES,
+        hard_max=MAX_BISECT_BYTES,
+    )
+    # list_snapshots with -r returns descendants too, but a sub-dataset's
+    # snapshot won't contain the requested path (different mount tree), so
+    # the predicate would oscillate and the monotonicity assumption breaks.
+    # Limit to snapshots of the exact dataset.
+    snaps = [
+        s
+        for s in m_list_snapshots({"dataset": dataset})["snapshots"]
+        if s["creation"] is not None and s["dataset"] == dataset
+    ]
+    snaps.sort(key=lambda s: s["creation"])
+    if len(snaps) < 2:  # noqa: PLR2004
+        return {
+            "dataset": dataset,
+            "path": path,
+            "predicate": predicate,
+            "transition": None,
+            "evaluated_snapshots": 0,
+            "total_snapshots": len(snaps),
+            "reason": "need at least two snapshots to bisect",
+        }
+    evaluated = 0
+    earliest_val = _eval_predicate(snaps[0]["name"], path, predicate, max_bytes)
+    evaluated += 1
+    latest_val = _eval_predicate(snaps[-1]["name"], path, predicate, max_bytes)
+    evaluated += 1
+    if earliest_val == latest_val:
+        return {
+            "dataset": dataset,
+            "path": path,
+            "predicate": predicate,
+            "transition": None,
+            "earliest_value": earliest_val,
+            "latest_value": latest_val,
+            "evaluated_snapshots": evaluated,
+            "total_snapshots": len(snaps),
+            "reason": "predicate has the same value at both ends of the window",
+        }
+    # Bisect: find smallest index where eval == latest_val.
+    lo, hi = 0, len(snaps) - 1
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        mid_val = _eval_predicate(snaps[mid]["name"], path, predicate, max_bytes)
+        evaluated += 1
+        if mid_val == latest_val:
+            hi = mid
+        else:
+            lo = mid
+    return {
+        "dataset": dataset,
+        "path": path,
+        "predicate": predicate,
+        "transition": {
+            "from_snapshot": snaps[lo]["name"],
+            "from_creation": snaps[lo]["creation"],
+            "from_value": earliest_val,
+            "to_snapshot": snaps[hi]["name"],
+            "to_creation": snaps[hi]["creation"],
+            "to_value": latest_val,
+            "transition_seconds": snaps[hi]["creation"] - snaps[lo]["creation"],
+        },
+        "evaluated_snapshots": evaluated,
+        "total_snapshots": len(snaps),
+    }
+
+
 def m_read_file(params: dict[str, Any]) -> dict[str, Any]:
     snapshot = _require_str(params, "snapshot")
     path = _require_str(params, "path")
@@ -1275,6 +1623,7 @@ METHODS: Final[dict[str, Any]] = {
     "diff_snapshots": m_diff_snapshots,
     "list_dir": m_list_dir,
     "size_breakdown": m_size_breakdown,
+    "top_consumers": m_top_consumers,
     "read_file": m_read_file,
     "find_files": m_find_files,
     "content_grep": m_content_grep,
@@ -1285,6 +1634,8 @@ METHODS: Final[dict[str, Any]] = {
     "first_appearance": m_first_appearance,
     "last_appearance": m_last_appearance,
     "find_deleted": m_find_deleted,
+    "bisect_change": m_bisect_change,
+    "stale_snapshots": m_stale_snapshots,
     "size_delta": m_size_delta,
 }
 

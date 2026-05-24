@@ -151,6 +151,7 @@ def test_methods_table_is_what_we_expect() -> None:
         "diff_snapshots",
         "list_dir",
         "size_breakdown",
+        "top_consumers",
         "read_file",
         "find_files",
         "content_grep",
@@ -161,6 +162,8 @@ def test_methods_table_is_what_we_expect() -> None:
         "first_appearance",
         "last_appearance",
         "find_deleted",
+        "bisect_change",
+        "stale_snapshots",
         "size_delta",
     }
     assert set(agent.METHODS) == expected

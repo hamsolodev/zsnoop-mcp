@@ -204,6 +204,35 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         return await _call(host, "size_breakdown", params)
 
     @mcp.tool()
+    async def top_consumers(
+        host: str,
+        snapshot: str,
+        path: str,
+        n: int | None = None,
+        max_entries: int | None = None,
+    ) -> dict[str, Any]:
+        """Top-`n` largest files and directories under a snapshot subtree.
+
+        Walks the subtree (bounded the same way as ``size_breakdown``)
+        and keeps a heap of the *n* largest entries seen — files,
+        directories (subtree total), and symlinks (own lstat size).
+        Result is like ``du -ab | sort -rn | head -n``, with paths
+        relative to ``path``.
+
+        Use after ``size_breakdown`` once you know *which subtree* is
+        big and want to know *which specific files and dirs* inside it
+        are responsible. ``n`` defaults to 20 (hard cap 1000);
+        ``max_entries`` defaults to 100,000 walked (hard cap 1,000,000)
+        and the same 30s wall-clock backstop applies.
+        """
+        params: dict[str, Any] = {"snapshot": snapshot, "path": path}
+        if n is not None:
+            params["n"] = n
+        if max_entries is not None:
+            params["max_entries"] = max_entries
+        return await _call(host, "top_consumers", params)
+
+    @mcp.tool()
     async def read_file(
         host: str,
         snapshot: str,
@@ -388,6 +417,69 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         if max_results is not None:
             params["max_results"] = max_results
         return await _call(host, "find_deleted", params)
+
+    @mcp.tool()
+    async def bisect_change(
+        host: str,
+        dataset: str,
+        path: str,
+        predicate: dict[str, Any],
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Find the snapshot where `predicate` about `path` flips its value.
+
+        Evaluates the predicate at the earliest and latest snapshots; if
+        they disagree, bisects in O(log N) calls and returns the
+        snapshot pair on either side of the transition. If they agree,
+        returns ``transition: null`` with a ``reason``.
+
+        Predicate shapes:
+
+        - ``{"kind": "exists"}`` — `path` is a regular file
+        - ``{"kind": "contains", "needle": "..."}`` — UTF-8 substring in first ``max_bytes``
+        - ``{"kind": "sha256_equals", "hash": "<64 hex chars>"}`` — SHA-256 of first ``max_bytes``
+        - ``{"kind": "size_at_least", "size": N}`` — file size at least N bytes
+
+        Bisect assumes the predicate is monotonic across the snapshot
+        sequence (flips at most once). If it isn't, you get *some*
+        transition, not necessarily the one you wanted.
+        """
+        params: dict[str, Any] = {
+            "dataset": dataset,
+            "path": path,
+            "predicate": predicate,
+        }
+        if max_bytes is not None:
+            params["max_bytes"] = max_bytes
+        return await _call(host, "bisect_change", params)
+
+    @mcp.tool()
+    async def stale_snapshots(
+        host: str,
+        older_than: str,
+        dataset: str | None = None,
+        max_results: int | None = None,
+    ) -> dict[str, Any]:
+        """Snapshots older than `older_than`, sorted by unique bytes desc.
+
+        ``older_than`` accepts ISO 8601 or a phrase like ``"6 months ago"``,
+        ``"last year"``. Results are sorted so the biggest-by-``used``
+        appear first — direct input to "what should I cull?". Scoped to
+        ``dataset`` if given, else covers every visible snapshot.
+        Bounded by ``max_results`` (default 1000, capped at 10 000).
+        """
+        try:
+            older_than_iso = maybe_to_iso(older_than)
+        except TimePhraseError as e:
+            raise ValueError(f"could not parse time phrase: {e}") from e
+        if older_than_iso is None:
+            raise ValueError("older_than must be a non-empty time phrase or ISO 8601 string")
+        params: dict[str, Any] = {"older_than": older_than_iso}
+        if dataset is not None:
+            params["dataset"] = dataset
+        if max_results is not None:
+            params["max_results"] = max_results
+        return await _call(host, "stale_snapshots", params)
 
     @mcp.tool()
     async def size_delta(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:

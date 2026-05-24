@@ -63,6 +63,7 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `diff_snapshots`       | Path-level diff between two snapshots                    |
 | `list_dir`             | Bounded directory listing within a snapshot              |
 | `size_breakdown`       | Recursive bytes for a snapshot dir + per-child sizes     |
+| `top_consumers`        | Top-N largest files/dirs under a snapshot subtree        |
 | `read_file`            | Bounded read; UTF-8 or base64 for binary                 |
 | `find_files`           | `fnmatch` name search inside a snapshot                  |
 | `content_grep`         | Regex content search inside a snapshot                   |
@@ -73,6 +74,8 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `first_appearance`     | Earliest snapshot containing a path                      |
 | `last_appearance`      | Latest snapshot containing a path (answers "when did X disappear?") |
 | `find_deleted`         | Paths deleted between two snapshots in a time window     |
+| `bisect_change`        | Binary-search snapshots for the one where a predicate flips |
+| `stale_snapshots`      | Snapshots older than a time phrase, sorted by unique bytes |
 | `size_delta`           | Bytes written between two snapshots of one dataset       |
 
 Time-range parameters accept ISO 8601 *or* human phrases — `yesterday`,

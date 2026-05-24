@@ -45,9 +45,10 @@ The agent dispatches RPCs through an **explicit `METHODS` allowlist** in
 Allowlist (read-only): `agent_info`, `list_pools`, `pool_status`,
 `list_datasets`, `dataset_properties`, `list_snapshots`,
 `snapshot_cadence`, `diff_snapshots`, `list_dir`, `size_breakdown`,
-`read_file`, `find_files`, `content_grep`, `file_history`, `versions_of`,
-`file_diff`, `snapshots_containing`, `first_appearance`,
-`last_appearance`, `find_deleted`, `size_delta`.
+`top_consumers`, `read_file`, `find_files`, `content_grep`,
+`file_history`, `versions_of`, `file_diff`, `snapshots_containing`,
+`first_appearance`, `last_appearance`, `find_deleted`, `bisect_change`,
+`stale_snapshots`, `size_delta`.
 
 Adding a mutating method requires editing the agent source — there is no
 configuration knob that turns mutation on. The test
@@ -98,6 +99,9 @@ all; symlinks are reported with their target string as data. Tests:
 | `file_diff`        | `max_bytes` per side (default 1 MiB, server-capped at 4 MiB) |
 | `versions_of`      | `max_bytes` per snapshot read (default 1 MiB, server-capped at 4 MiB) |
 | `find_deleted`     | `max_results` (default 1000, server-capped at 10 000)  |
+| `top_consumers`    | `n` heap size (default 20, capped at 1000); `max_entries` walk cap as `size_breakdown`; 30 s wall time |
+| `stale_snapshots`  | `max_results` (default 1000, server-capped at 10 000)  |
+| `bisect_change`    | `max_bytes` per predicate read (default 1 MiB, server-capped at 4 MiB); evaluates O(log N) snapshots |
 | Per zfs subprocess | 30 s wall time, enforced via `subprocess.run(timeout=)` |
 | Transport recv     | 60 s wall time, enforced in `AgentConnection._recv`    |
 

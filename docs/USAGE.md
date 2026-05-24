@@ -93,6 +93,28 @@ calling it again on whichever child is biggest. Bounded by `max_entries`
 response (or `is_truncated=true` on a specific child) tells you which
 subtree got clipped.
 
+> "Now tell me the specific files and dirs hogging the space inside Spice."
+
+`top_consumers(host=…, snapshot=…, path="Spice", n=20)` walks the
+subtree and returns the 20 largest entries (files and directory subtree
+totals), ranked. Use this after `size_breakdown` when you've drilled
+down enough and want the actual filenames.
+
+> "Which snapshots on `rpool/home/youruser` are older than six months — and which are biggest?"
+
+`stale_snapshots(host=…, dataset="rpool/home/youruser", older_than="6 months ago")`
+returns the matching snapshots sorted by unique-`used` bytes descending,
+so the top of the list is the best place to start culling.
+
+> "When did `/etc/foo.conf` first contain the string `BAD_HEADER`?"
+
+`bisect_change(host=…, dataset="rpool/ROOT/debian", path="etc/foo.conf",
+predicate={"kind": "contains", "needle": "BAD_HEADER"})` runs a binary
+search across the snapshot timeline — O(log N) predicate evaluations
+instead of N — and returns the snapshot pair that frames the
+transition. Other predicate kinds: `exists`, `sha256_equals`, and
+`size_at_least`.
+
 > "Is `rpool/home/youruser/transmission` actually being snapshotted?"
 
 `list_snapshots(dataset="rpool/home/youruser/transmission")` — if empty, nothing
