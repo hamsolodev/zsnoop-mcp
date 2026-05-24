@@ -54,7 +54,7 @@ criteria, and reviewed every change before it landed; Claude handled the
 bulk of the drafting, test scaffolding, refactors, and documentation.
 Read-only-by-construction was a hard requirement from day one, enforced
 by an explicit method allowlist and the test suite — see
-[SECURITY.md](docs/SECURITY.md). If you're reviewing or auditing the
+[SECURITY.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md). If you're reviewing or auditing the
 code, treat that as context, not as a reason to skip the usual scrutiny.
 
 ## How it works
@@ -137,7 +137,7 @@ uv sync
 uv tool install zsnoop-mcp    # or: pip install zsnoop-mcp
 ```
 
-See [docs/PUBLISHING.md](docs/PUBLISHING.md) for the per-release flow
+See [docs/PUBLISHING.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/PUBLISHING.md) for the per-release flow
 (version bump → tag → CI publishes via OIDC).
 
 ## Configure
@@ -169,7 +169,7 @@ Per-host setup on the remote (one-time):
 sudo zfs allow -u $USER diff rpool
 ```
 
-See [docs/INSTALL.md](docs/INSTALL.md) for the full setup, including sudo
+See [docs/INSTALL.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/INSTALL.md) for the full setup, including sudo
 mode for reading root-owned snapshot files.
 
 ## Wire into Claude Code
@@ -203,19 +203,19 @@ Restart your Claude Code session; the tools appear under the `zsnoop` namespace.
 
 ## Use
 
-See [docs/USAGE.md](docs/USAGE.md) for example prompts that exercise the
+See [docs/USAGE.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/USAGE.md) for example prompts that exercise the
 file-recovery, drift-audit, and forensics workflows.
 
 ## Documentation
 
-- **New here?** Start with the [onboarding tutorial](docs/onboarding/index.md) —
+- **New here?** Start with the [onboarding tutorial](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/onboarding/index.md) —
   a 10-chapter, what/why/how walk through the codebase, ending with a
   worked example of adding a new tool end-to-end. Renders nicely as HTML
   via `uv run mkdocs serve` (see `--group docs`).
-- [Installation](docs/INSTALL.md) — local setup, ZFS delegation, sudo mode
-- [Usage examples](docs/USAGE.md) — concrete prompts the tools handle
-- [Security model](docs/SECURITY.md) — threat model, guarantees, sudo tradeoff
-- [Publishing](docs/PUBLISHING.md) — releasing to PyPI
+- [Installation](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/INSTALL.md) — local setup, ZFS delegation, sudo mode
+- [Usage examples](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/USAGE.md) — concrete prompts the tools handle
+- [Security model](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md) — threat model, guarantees, sudo tradeoff
+- [Publishing](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/PUBLISHING.md) — releasing to PyPI
 
 ## Development
 
@@ -234,4 +234,4 @@ Pre-commit runs `pip-audit` automatically whenever `pyproject.toml` or
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/hamsolodev/zsnoop-mcp/blob/main/LICENSE).

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-24
+
+### Fixed
+
+- **PyPI README links.** The `docs/...` and `LICENSE` links in the
+  README were relative paths, so they rendered as 404s on
+  <https://pypi.org/project/zsnoop-mcp/>. Rewritten to absolute
+  `https://github.com/hamsolodev/zsnoop-mcp/blob/main/...` URLs so
+  both GitHub and PyPI render them correctly.
+
+No code changes; v0.1.0 and v0.1.1 are functionally identical.
+
 ## [0.1.0] — 2026-05-24
 
 Initial public release.
@@ -74,5 +86,6 @@ Initial public release.
 - PII scrubbed from example values throughout the repo and from git
   history.
 
-[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.1.0
