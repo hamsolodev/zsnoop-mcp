@@ -1,5 +1,13 @@
 # zsnoop-mcp
 
+**Ask your AI assistant things like:**
+
+- ⏪ *"Recover my `.zshrc` from before I committed the rewrite three weeks ago."*
+- 🧹 *"Which snapshots older than 6 months are wasting the most space?"*
+- 🔎 *"When did the directory `/srv/backups` first appear on this host?"*
+- ⌛ *"Find everything deleted under `/home/youruser` in the last week, and show me when each thing was last present."*
+- 🏥 *"Are any of my pools throwing disk errors? When was the last scrub?"*
+
 An MCP server for **read-only exploration of ZFS snapshots on remote hosts**.
 
 Browse, diff, search, and read files from any snapshot on any of your ZFS

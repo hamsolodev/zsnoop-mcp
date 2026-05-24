@@ -84,18 +84,18 @@ by `max_results`.
 `size_delta(snap_a=<last week's daily>, snap_b=<today's daily>)`. Useful for
 tracking churn rates on a dataset.
 
-> "How big is `/home/youruser/Spice` in the latest snapshot, and what's inside it that's eating the space?"
+> "How big is `/home/youruser/Photos` in the latest snapshot, and what's inside it that's eating the space?"
 
-`size_breakdown(host=…, snapshot=<latest-of-the-dataset>, path="Spice")`
+`size_breakdown(host=…, snapshot=<latest-of-the-dataset>, path="Photos")`
 returns the recursive total plus per-immediate-child bytes. Drill down by
 calling it again on whichever child is biggest. Bounded by `max_entries`
 (default 100,000) and a 30 s wall-clock budget — `truncated=true` on the
 response (or `is_truncated=true` on a specific child) tells you which
 subtree got clipped.
 
-> "Now tell me the specific files and dirs hogging the space inside Spice."
+> "Now tell me the specific files and dirs hogging the space inside Photos."
 
-`top_consumers(host=…, snapshot=…, path="Spice", n=20)` walks the
+`top_consumers(host=…, snapshot=…, path="Photos", n=20)` walks the
 subtree and returns the 20 largest entries (files and directory subtree
 totals), ranked. Use this after `size_breakdown` when you've drilled
 down enough and want the actual filenames.

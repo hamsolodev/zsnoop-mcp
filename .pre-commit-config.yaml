@@ -36,8 +36,10 @@ repos:
       # Scoped to dependency-changing files so day-to-day commits stay fast;
       # run `uv run pip-audit --skip-editable` ad hoc to scan against the
       # freshest advisory data without changing the lockfile.
-      # --skip-editable excludes the in-development zsnoop-mcp itself, which
-      # isn't yet on PyPI and so can't be looked up.
+      # --skip-editable excludes the in-tree editable zsnoop-mcp install —
+      # pip-audit can't audit editable installs regardless of whether the
+      # project has a published version (the version on disk doesn't
+      # necessarily match anything on PyPI).
       - id: pip-audit
         name: pip-audit (CVE scan of locked deps)
         entry: uv run pip-audit --skip-editable

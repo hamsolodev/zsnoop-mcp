@@ -19,6 +19,32 @@ Browse, diff, search, and read files from any snapshot on any of your ZFS
 hosts through your AI assistant, over a single persistent SSH connection per
 host. No mutation operations are ever exposed.
 
+## Quickstart
+
+```sh
+# 1. Install
+uv tool install zsnoop-mcp        # or: pipx install zsnoop-mcp
+
+# 2. Configure one host (more in docs/INSTALL.md)
+mkdir -p ~/.config/zsnoop-mcp
+cat > ~/.config/zsnoop-mcp/hosts.toml <<'EOF'
+[hosts.myhost]
+ssh_target = "myhost.example.com"
+agent_mode = "bootstrap"
+sudo       = false
+EOF
+
+# 3. Register the MCP server with Claude Code
+claude mcp add zsnoop --scope user -- zsnoop-mcp
+
+# 4. Restart Claude Code, then ask your assistant any of the prompts above.
+```
+
+The agent is streamed over SSH on first connect — nothing needs to be
+installed on the remote host beyond `python3` (3.11+) and the `zfs` CLI.
+Read-only is enforced by an explicit allowlist on the agent side; the
+LLM can't bypass it.
+
 ## About this codebase
 
 This project was developed collaboratively with [Claude
@@ -105,13 +131,14 @@ cd zsnoop-mcp
 uv sync
 ```
 
-### From PyPI (when published)
+### From PyPI
 
 ```sh
-pip install zsnoop-mcp        # or: uv tool install zsnoop-mcp
+uv tool install zsnoop-mcp    # or: pip install zsnoop-mcp
 ```
 
-See [docs/PUBLISHING.md](docs/PUBLISHING.md) for the publish flow.
+See [docs/PUBLISHING.md](docs/PUBLISHING.md) for the per-release flow
+(version bump → tag → CI publishes via OIDC).
 
 ## Configure
 

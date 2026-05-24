@@ -20,7 +20,7 @@ uv sync
 
 Run it with `uv run zsnoop-mcp`.
 
-### From PyPI (when published)
+### From PyPI
 
 ```sh
 uv tool install zsnoop-mcp   # or: pip install zsnoop-mcp

@@ -133,17 +133,20 @@ stay fast; we also re-run it manually before publishing (see
 [PUBLISHING.md](../PUBLISHING.md)) to catch advisories that may have
 landed against an otherwise-unchanged pinned dep.
 
-`--skip-editable` excludes the in-tree `zsnoop-mcp` itself, which isn't
-on PyPI yet and so can't be looked up. Findings exit nonzero and block
-the commit; the resolutions are bump the dep (`uv lock --upgrade-package
-<name>`), or — for a deliberately-accepted finding — `--ignore-vuln <ID>`
-with a comment in the hook config explaining why.
+`--skip-editable` excludes the in-tree `zsnoop-mcp` install — pip-audit
+can't meaningfully audit editable installs (the version on disk may not
+match anything published). Findings exit nonzero and block the commit;
+the resolutions are bump the dep (`uv lock --upgrade-package <name>`),
+or — for a deliberately-accepted finding — `--ignore-vuln <ID>` with a
+comment in the hook config explaining why.
 
 ### Releasing to PyPI
 
-See [docs/PUBLISHING.md](../PUBLISHING.md) for the two release paths
-(manual `uv publish` vs trusted publishing via CI). The pre-flight
-checklist there walks you through everything.
+Releases are cut by pushing a `vX.Y.Z` tag; CI builds the wheel + sdist
+and publishes to PyPI via OIDC trusted publishing (no API token on
+anyone's machine). See [docs/PUBLISHING.md](../PUBLISHING.md) for the
+per-release checklist and the (already-done-for-this-repo) one-time
+trusted-publisher setup.
 
 ## What to read next
 
