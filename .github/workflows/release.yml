@@ -1,0 +1,103 @@
+name: Release
+
+# Triggered by pushing a version tag like v0.1.0. The build job produces
+# the wheel + sdist; the publish job uploads to PyPI via OIDC trusted
+# publishing (no API token needed — configure the trusted publisher on
+# pypi.org pointing at this workflow before the first release).
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Build
+        run: uv build
+
+      - name: Verify the agent is force-included in the wheel
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/zsnoop_mcp-*.whl)
+          unzip -l "$wheel" | grep -q "zsnoop_mcp/_agent_source/zfs_snoop_agent.py" \
+            || { echo "ERROR: agent script not present in wheel" >&2; exit 1; }
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # 'pypi' must exist as a GitHub Environment on the repo. Trusted-
+    # publisher configuration on pypi.org references this environment.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/zsnoop-mcp/
+    permissions:
+      # OIDC token for PyPI trusted publishing.
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No 'password:' — OIDC is used. The action picks up the
+          # ambient token granted by id-token: write.
+          print-hash: true
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create release with wheel + sdist attached
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          # Use the CHANGELOG entry for this version as the release body
+          # if we can extract it; otherwise fall back to "See CHANGELOG.md".
+          notes=$(awk -v v="${tag#v}" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          if [ -z "$notes" ]; then
+            notes="See [CHANGELOG.md](CHANGELOG.md) for release notes."
+          fi
+          gh release create "$tag" dist/* \
+            --title "$tag" \
+            --notes "$notes"

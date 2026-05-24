@@ -1,0 +1,79 @@
+name: Bug report
+description: Something isn't working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        **Security issue?** Please don't open a public issue — follow
+        [SECURITY.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md)
+        and use the GitHub Security Advisory flow instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. Include the exact tool call and what the MCP client (or `uv run zsnoop-mcp`) returned.
+      placeholder: |
+        e.g. `list_snapshots(host="r2d2", dataset="rpool/home")` returned ... but I expected ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: Minimal steps. Include the relevant host config (with secrets redacted) and the command/tool call.
+      placeholder: |
+        1. hosts.toml contains: ...
+        2. Run: ...
+        3. Observe: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: zsnoop-mcp version
+      description: Output of `uv run zsnoop-mcp --version` or `pip show zsnoop-mcp`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.13.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Local OS (where zsnoop-mcp runs)
+      placeholder: "Fedora 44 / Ubuntu 24.04 / macOS 14"
+    validations:
+      required: true
+
+  - type: input
+    id: remote-os
+    attributes:
+      label: Remote OS + ZFS version (if a remote-host bug)
+      placeholder: "Debian 12, OpenZFS 2.2.6"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stderr output
+      description: Run with `--log-level INFO` (or DEBUG) and paste the relevant output. Scrub any hostnames / secrets you care about.
+      render: shell

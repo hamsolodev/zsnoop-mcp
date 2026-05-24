@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # Python runtime + dev + docs deps via pyproject.toml.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Bundle ruff / mypy / pytest patch+minor bumps into one PR;
+      # majors still come through separately.
+      dev-tooling:
+        applies-to: version-updates
+        update-types: [minor, patch]
+        patterns: ["ruff*", "mypy*", "pytest*", "pre-commit*"]
+      docs-tooling:
+        applies-to: version-updates
+        update-types: [minor, patch]
+        patterns: ["mkdocs*", "pymdown-extensions"]
+    commit-message:
+      prefix: "deps"
+      include: scope
+
+  # GitHub Actions versions in .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci(deps)"
+      include: scope

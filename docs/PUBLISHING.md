@@ -102,36 +102,53 @@ uv build
 UV_PUBLISH_TOKEN=$(pass pypi/zsnoop-mcp) uv publish
 ```
 
-### Option B — trusted publishing via GitHub Actions
+### Option B — trusted publishing via GitHub Actions (recommended)
 
-Higher-friction first time, but no long-lived secret stored anywhere.
+Higher-friction first time, but no long-lived secret stored anywhere
+afterwards. The workflow at
+[`.github/workflows/release.yml`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/.github/workflows/release.yml)
+implements this; you only need to wire it up on the GitHub and PyPI
+sides once.
 
-1. Push the repo to GitHub (mirror is fine).
-2. Add a publisher to the PyPI project: *Settings → Publishing → Add a new
-   pending publisher*, fill in `owner/repo`, workflow filename, environment
-   name.
-3. Add `.github/workflows/release.yml` (or `.forgejo/workflows/release.yml`
-   for Forgejo Actions, syntax-compatible) along these lines:
+**One-time setup:**
 
-   ```yaml
-   name: release
-   on:
-     push:
-       tags: ["v*"]
-   jobs:
-     publish:
-       runs-on: ubuntu-latest
-       environment: pypi
-       permissions:
-         id-token: write
-       steps:
-         - uses: actions/checkout@v4
-         - uses: astral-sh/setup-uv@v3
-         - run: uv build
-         - uses: pypa/gh-action-pypi-publish@release/v1
+1. **Push the repo to GitHub** at `hamsolodev/zsnoop-mcp`.
+2. **Create the `pypi` environment.** Repo → Settings → Environments →
+   New environment → name `pypi`. Optionally restrict deployments to
+   tags matching `v*.*.*` for an extra safety net.
+3. **Add a PyPI trusted publisher.** On pypi.org (after creating the
+   project, which can be done by uploading once manually OR by adding
+   a *pending publisher* before any release exists):
+   PyPI project page → Settings → Publishing → *Add a new pending
+   publisher*. Fill in:
+   - Owner: `hamsolodev`
+   - Repository: `zsnoop-mcp`
+   - Workflow filename: `release.yml`
+   - Environment name: `pypi`
+
+**Per-release:**
+
+1. Bump the version in `pyproject.toml` and add a new section to
+   `CHANGELOG.md`.
+2. Commit, then tag:
+
+   ```sh
+   git tag v0.1.0
+   git push origin main v0.1.0
    ```
 
-4. Tag and push as in option A; CI publishes.
+3. The workflow:
+   - Builds wheel + sdist, asserts the agent is present in the wheel.
+   - Publishes to PyPI via OIDC (no token).
+   - Creates a GitHub Release with the artifacts attached and the
+     CHANGELOG.md entry for that version as the release body.
+
+If the build job fails, no release happens. If the publish step fails
+after build succeeds (e.g. version already exists on PyPI), fix the
+underlying issue, delete the tag (`git push --delete origin v0.1.0;
+git tag -d v0.1.0`), bump the version, and try again. Once a version
+is published to PyPI it can be *yanked* but not deleted, so be sure
+about the version number before tagging.
 
 ### TestPyPI dry run
 

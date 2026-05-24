@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest a new tool, a new option on an existing tool, or a workflow improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Before opening, please skim
+        [CONTRIBUTING.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/CONTRIBUTING.md#what-im-unlikely-to-merge)
+        for the "what I'm unlikely to merge" list — saves us both time
+        if the idea falls in there (mutation operations, eval-style
+        features, heavy runtime dependencies).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the workflow that's painful today. Concrete example > abstract description.
+      placeholder: |
+        e.g. "When I want to know X about Y, I currently have to call
+        N tools and combine the results by hand."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: What new tool / parameter / behaviour? If it's a new tool, sketch the signature and expected output.
+      placeholder: |
+        e.g. "Add `foo(host, dataset, ...)` that returns `{...}`. The
+        agent would call `zfs ...` and parse the result like so."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What did you try first? Why didn't it work?
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security considerations
+      description: Does this touch user input that becomes argv or a filesystem path? Does it broaden the dispatch allowlist? Does it need new bounds? (See `docs/SECURITY.md` G1–G6.)

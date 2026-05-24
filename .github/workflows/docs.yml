@@ -1,0 +1,64 @@
+name: Docs
+
+# Build the mkdocs site on every push to main and deploy to GitHub
+# Pages using the modern Pages Actions flow (no gh-pages branch).
+#
+# Enable Pages on the repo (Settings → Pages → Source: "GitHub Actions")
+# before the first run.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one concurrent deploy; queue subsequent pushes.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build mkdocs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync docs dependencies
+        run: uv sync --group docs
+
+      - name: Build site (strict)
+        env:
+          ZSNOOP_REPO_URL: https://github.com/${{ github.repository }}
+          ZSNOOP_REPO_BRANCH: main
+          ZSNOOP_SOURCE_PREFIX: /blob
+        run: uv run mkdocs build --strict
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
