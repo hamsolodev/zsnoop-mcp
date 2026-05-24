@@ -124,6 +124,33 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         return await _call(host, "list_dir", params)
 
     @mcp.tool()
+    async def size_breakdown(
+        host: str,
+        snapshot: str,
+        path: str,
+        max_entries: int | None = None,
+    ) -> dict[str, Any]:
+        """Total bytes for a snapshot directory, plus per-immediate-child sizes.
+
+        Equivalent to ``du --max-depth=1 --block-size=1`` on the snapshot
+        path. For each immediate child of ``path``, returns the recursive
+        byte total of its subtree. Symlinks are never followed (their own
+        inode size is counted). Use this to answer "how big is X?" and
+        "what's inside X that's taking the space?" in a single call;
+        drill down by calling again on a large child.
+
+        Bounded by ``max_entries`` (default 100,000, hard cap 1,000,000)
+        and by a 30s wall-clock budget. On hitting either limit, the
+        response sets ``truncated=true`` and each affected child carries
+        ``is_truncated=true`` so the caller can see which subtree was
+        clipped.
+        """
+        params: dict[str, Any] = {"snapshot": snapshot, "path": path}
+        if max_entries is not None:
+            params["max_entries"] = max_entries
+        return await _call(host, "size_breakdown", params)
+
+    @mcp.tool()
     async def read_file(
         host: str,
         snapshot: str,

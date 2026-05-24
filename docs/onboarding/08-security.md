@@ -72,6 +72,7 @@ symlink at all. Tests:
 | --- | --- |
 | `read_file` | caller-provided `max_bytes`, server-capped at 4 MiB |
 | `list_dir` | `max_entries`, default 1000, server-capped at 10 000 |
+| `size_breakdown` | `max_entries`, default 100 000, server-capped at 1 000 000; plus 30 s wall time |
 | `find_files` / `content_grep` | `max_results`, default 100, capped at 1000 |
 | Per `zfs` subprocess | 30 s wall time |
 | Transport recv | 60 s wall time |
@@ -79,7 +80,8 @@ symlink at all. Tests:
 Truncation sets `truncated: true` in the response rather than failing.
 Tests:
 [`test_list_dir_truncates_at_max_entries`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_methods.py),
-[`test_find_files_truncates`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_methods.py).
+[`test_find_files_truncates`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_methods.py),
+[`test_size_breakdown_truncates_on_budget`]({{ config.repo_url }}/src/branch/{{ repo_branch }}/tests/test_methods.py).
 
 ### G5 — Defence in depth via ZFS delegation (user mode)
 

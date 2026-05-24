@@ -84,6 +84,7 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "list_snapshots",
         "diff_snapshots",
         "list_dir",
+        "size_breakdown",
         "read_file",
         "find_files",
         "content_grep",
@@ -148,6 +149,32 @@ async def test_read_file_passes_max_bytes(cfg: Config, fake_pool: FakePool) -> N
     )
     assert fake_pool.calls == [
         ("r2d2", "read_file", {"snapshot": "rpool@a", "path": "foo", "max_bytes": 4096}),
+    ]
+
+
+async def test_size_breakdown_omits_max_entries_when_none(
+    cfg: Config,
+    fake_pool: FakePool,
+) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    await _tool_call(server, "size_breakdown", host="r2d2", snapshot="rpool@a", path="d")
+    assert fake_pool.calls == [
+        ("r2d2", "size_breakdown", {"snapshot": "rpool@a", "path": "d"}),
+    ]
+
+
+async def test_size_breakdown_passes_max_entries(cfg: Config, fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    await _tool_call(
+        server,
+        "size_breakdown",
+        host="r2d2",
+        snapshot="rpool@a",
+        path="d",
+        max_entries=500,
+    )
+    assert fake_pool.calls == [
+        ("r2d2", "size_breakdown", {"snapshot": "rpool@a", "path": "d", "max_entries": 500}),
     ]
 
 

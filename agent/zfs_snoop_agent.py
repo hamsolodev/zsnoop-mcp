@@ -26,6 +26,7 @@ import signal
 import stat as stat_mod
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,13 +48,22 @@ MAX_READ_BYTES: Final = 4 * 1024 * 1024
 MAX_DIR_ENTRIES: Final = 10_000
 MAX_FIND_RESULTS: Final = 1_000
 MAX_GREP_RESULTS: Final = 1_000
+# Total filesystem entries the recursive `size_breakdown` walk may visit
+# before returning a truncated result. 1M lstat calls is roughly 5-10s of
+# wall-clock on a hot cache; SIZE_WALK_TIMEOUT_SECONDS is the hard backstop.
+MAX_SIZE_WALK_ENTRIES: Final = 1_000_000
 DEFAULT_READ_BYTES: Final = 1 * 1024 * 1024
 DEFAULT_DIR_ENTRIES: Final = 1_000
 DEFAULT_FIND_RESULTS: Final = 100
 DEFAULT_GREP_RESULTS: Final = 100
+DEFAULT_SIZE_WALK_ENTRIES: Final = 100_000
 
 # Subprocess wall-clock timeout for any single zfs invocation.
 ZFS_TIMEOUT_SECONDS: Final = 30.0
+# Wall-clock cap on a single size_breakdown walk. Belt-and-braces against
+# pathological cache-cold filesystems where the entry budget alone is too
+# loose. Truncates with `truncated: true` rather than failing.
+SIZE_WALK_TIMEOUT_SECONDS: Final = 30.0
 
 # ZFS naming rules (intentionally restrictive; matches typical usage).
 DATASET_RE: Final = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:/-]*$")
@@ -247,7 +257,9 @@ class Limits:
     max_dir_entries: int = MAX_DIR_ENTRIES
     max_find_results: int = MAX_FIND_RESULTS
     max_grep_results: int = MAX_GREP_RESULTS
+    max_size_walk_entries: int = MAX_SIZE_WALK_ENTRIES
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
+    size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
 
 
 def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
@@ -260,7 +272,9 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_dir_entries": MAX_DIR_ENTRIES,
             "max_find_results": MAX_FIND_RESULTS,
             "max_grep_results": MAX_GREP_RESULTS,
+            "max_size_walk_entries": MAX_SIZE_WALK_ENTRIES,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
+            "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
         },
     }
 
@@ -383,6 +397,133 @@ def m_list_dir(params: dict[str, Any]) -> dict[str, Any]:
         "snapshot": snapshot,
         "path": path,
         "entries": entries,
+        "truncated": truncated,
+    }
+
+
+def _sum_subtree(
+    root: Path,
+    budget: list[int],
+    deadline: float,
+) -> tuple[int, bool]:
+    """Sum the lstat sizes of every entry under *root*.
+
+    *budget* is a one-element list so callers can observe what's left after
+    nested recursion drains it. *deadline* is a monotonic-clock cutoff.
+
+    Symlinks are counted by their own lstat size and never followed (G3).
+    Subdirectories that error on scandir are skipped silently.
+
+    Returns ``(bytes, truncated)`` where *truncated* is true if either the
+    entry budget or the wall-clock deadline ran out mid-walk.
+    """
+    total = 0
+    truncated = False
+    stack: list[Path] = [root]
+    while stack:
+        if budget[0] <= 0 or time.monotonic() >= deadline:
+            truncated = True
+            break
+        current = stack.pop()
+        try:
+            it = os.scandir(current)
+        except OSError:
+            continue
+        with it:
+            for entry in it:
+                if budget[0] <= 0 or time.monotonic() >= deadline:
+                    truncated = True
+                    break
+                budget[0] -= 1
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                total += st.st_size
+                # follow_symlinks=False means S_ISDIR is false for symlinks
+                # to dirs, so this is naturally safe (G3).
+                if stat_mod.S_ISDIR(st.st_mode):
+                    stack.append(Path(entry.path))
+    return total, truncated
+
+
+def m_size_breakdown(params: dict[str, Any]) -> dict[str, Any]:
+    """Recursive byte total for a snapshot dir plus per-immediate-child sizes.
+
+    Equivalent in spirit to ``du --max-depth=1 --block-size=1 PATH``: for each
+    immediate child of *path*, recursively sum lstat sizes. Symlinks are never
+    followed; their own inode size is counted but they don't contribute their
+    target's contents.
+
+    Bounded by *max_entries* (default ``DEFAULT_SIZE_WALK_ENTRIES``, hard cap
+    ``MAX_SIZE_WALK_ENTRIES``) and by ``SIZE_WALK_TIMEOUT_SECONDS``. Either
+    limit hitting sets ``truncated: true`` on the response and on each
+    affected child entry, so the caller can tell which subtree was clipped.
+    """
+    snapshot = _require_str(params, "snapshot")
+    path = _require_str(params, "path")
+    max_entries = validate_positive_int(
+        params.get("max_entries"),
+        name="max_entries",
+        default=DEFAULT_SIZE_WALK_ENTRIES,
+        hard_max=MAX_SIZE_WALK_ENTRIES,
+    )
+    _, target = resolve_under_snapshot(snapshot, path)
+    if not target.is_dir():
+        raise PathError(f"not a directory: {path!r}")
+    deadline = time.monotonic() + SIZE_WALK_TIMEOUT_SECONDS
+    budget = [max_entries]
+    try:
+        with os.scandir(target) as it:
+            children = sorted(it, key=lambda e: e.name)
+    except OSError as e:
+        raise PathError(f"could not list directory: {e}") from e
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    total_bytes = 0
+    for child in children:
+        if budget[0] <= 0 or time.monotonic() >= deadline:
+            truncated = True
+            break
+        try:
+            st = child.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        budget[0] -= 1
+        mode = st.st_mode
+        child_bytes = st.st_size
+        child_truncated = False
+        if stat_mod.S_ISLNK(mode):
+            kind = "symlink"
+        elif stat_mod.S_ISDIR(mode):
+            kind = "dir"
+            sub_bytes, child_truncated = _sum_subtree(
+                Path(child.path),
+                budget,
+                deadline,
+            )
+            child_bytes += sub_bytes
+        elif stat_mod.S_ISREG(mode):
+            kind = "file"
+        else:
+            kind = "other"
+        entries.append(
+            {
+                "name": child.name,
+                "type": kind,
+                "bytes": child_bytes,
+                "is_truncated": child_truncated,
+            }
+        )
+        total_bytes += child_bytes
+        if child_truncated:
+            truncated = True
+    return {
+        "snapshot": snapshot,
+        "path": path,
+        "total_bytes": total_bytes,
+        "entries": entries,
+        "walked_entries": max_entries - budget[0],
         "truncated": truncated,
     }
 
@@ -619,6 +760,7 @@ METHODS: Final[dict[str, Any]] = {
     "list_snapshots": m_list_snapshots,
     "diff_snapshots": m_diff_snapshots,
     "list_dir": m_list_dir,
+    "size_breakdown": m_size_breakdown,
     "read_file": m_read_file,
     "find_files": m_find_files,
     "content_grep": m_content_grep,

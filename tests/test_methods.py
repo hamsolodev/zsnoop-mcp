@@ -167,6 +167,95 @@ def test_list_dir_truncates_at_max_entries(mock_mountpoint: dict[str, Any]) -> N
     assert result["truncated"] is True
 
 
+# ---- size_breakdown --------------------------------------------------------
+
+
+def test_size_breakdown_returns_total_and_per_child(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    result = agent.m_size_breakdown(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": ""},
+    )
+    by_name = {e["name"]: e for e in result["entries"]}
+    # Each known child shows up with the right type.
+    assert by_name["hello.txt"]["type"] == "file"
+    assert by_name["hello.txt"]["bytes"] == len("hello, world!\n")
+    assert by_name["sub"]["type"] == "dir"
+    assert by_name["empty_dir"]["type"] == "dir"
+    assert by_name["escape"]["type"] == "symlink"
+    # Total is exactly the sum of children (no double-counting).
+    assert result["total_bytes"] == sum(e["bytes"] for e in result["entries"])
+    assert result["truncated"] is False
+
+
+def test_size_breakdown_recurses_into_subdir(mock_mountpoint: dict[str, Any]) -> None:
+    """`sub/` contains nested.txt (file) and link_to_hello (symlink).
+
+    sub's reported bytes must equal: sub's own inode size + nested.txt's
+    bytes + link's lstat size. Following the symlink would add hello.txt's
+    bytes; this assertion catches that regression.
+    """
+    result = agent.m_size_breakdown(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": ""},
+    )
+    sub = next(e for e in result["entries"] if e["name"] == "sub")
+    sub_dir = mock_mountpoint["files"]["nested"].parent
+    expected = (
+        sub_dir.lstat().st_size
+        + (sub_dir / "nested.txt").lstat().st_size
+        + (sub_dir / "link_to_hello").lstat().st_size
+    )
+    assert sub["bytes"] == expected
+
+
+def test_size_breakdown_symlink_counted_as_self_not_target(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    """The `escape` symlink points to /etc/passwd; we count the link only."""
+    result = agent.m_size_breakdown(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": ""},
+    )
+    escape = next(e for e in result["entries"] if e["name"] == "escape")
+    assert escape["type"] == "symlink"
+    # /etc/passwd is typically >1 KB; if we'd followed the link, bytes would
+    # be that. Symlink lstat size on Linux is the length of the target path.
+    assert escape["bytes"] == len("/etc/passwd")
+
+
+def test_size_breakdown_truncates_on_budget(mock_mountpoint: dict[str, Any]) -> None:
+    result = agent.m_size_breakdown(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "", "max_entries": 1},
+    )
+    # max_entries=1 exhausts after the first top-level child.
+    assert result["truncated"] is True
+    assert result["walked_entries"] == 1
+
+
+def test_size_breakdown_rejects_non_directory(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    with pytest.raises(agent.PathError, match="not a directory"):
+        agent.m_size_breakdown(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "hello.txt"},
+        )
+
+
+def test_size_breakdown_rejects_dotdot(mock_mountpoint: dict[str, Any]) -> None:
+    with pytest.raises(agent.PathError):
+        agent.m_size_breakdown(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "../etc"},
+        )
+
+
+def test_size_breakdown_empty_directory(mock_mountpoint: dict[str, Any]) -> None:
+    result = agent.m_size_breakdown(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "empty_dir"},
+    )
+    assert result["total_bytes"] == 0
+    assert result["entries"] == []
+    assert result["truncated"] is False
+
+
 # ---- read_file --------------------------------------------------------------
 
 

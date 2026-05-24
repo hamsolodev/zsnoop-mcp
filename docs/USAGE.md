@@ -65,6 +65,15 @@ LLM enumerates the recent snapshot list, then calls `content_grep` on each.
 `size_delta(snap_a=<last week's daily>, snap_b=<today's daily>)`. Useful for
 tracking churn rates on a dataset.
 
+> "How big is `/home/youruser/Spice` in the latest snapshot, and what's inside it that's eating the space?"
+
+`size_breakdown(host=…, snapshot=<latest-of-the-dataset>, path="Spice")`
+returns the recursive total plus per-immediate-child bytes. Drill down by
+calling it again on whichever child is biggest. Bounded by `max_entries`
+(default 100,000) and a 30 s wall-clock budget — `truncated=true` on the
+response (or `is_truncated=true` on a specific child) tells you which
+subtree got clipped.
+
 > "Is `rpool/home/youruser/transmission` actually being snapshotted?"
 
 `list_snapshots(dataset="rpool/home/youruser/transmission")` — if empty, nothing

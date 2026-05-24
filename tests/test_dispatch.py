@@ -147,6 +147,7 @@ def test_methods_table_is_what_we_expect() -> None:
         "list_snapshots",
         "diff_snapshots",
         "list_dir",
+        "size_breakdown",
         "read_file",
         "find_files",
         "content_grep",

@@ -47,6 +47,7 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `list_snapshots`       | Snapshots (optionally scoped to a dataset, recursive)    |
 | `diff_snapshots`       | Path-level diff between two snapshots                    |
 | `list_dir`             | Bounded directory listing within a snapshot              |
+| `size_breakdown`       | Recursive bytes for a snapshot dir + per-child sizes     |
 | `read_file`            | Bounded read; UTF-8 or base64 for binary                 |
 | `find_files`           | `fnmatch` name search inside a snapshot                  |
 | `content_grep`         | Regex content search inside a snapshot                   |
