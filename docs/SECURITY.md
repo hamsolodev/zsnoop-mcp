@@ -104,7 +104,6 @@ all; symlinks are reported with their target string as data. Tests:
 | `bisect_change`    | `max_bytes` per predicate read (default 1 MiB, server-capped at 4 MiB); evaluates O(log N) snapshots |
 | Per zfs subprocess | 30 s wall time for general commands; 300 s for `zfs diff`, enforced via `subprocess.run(timeout=)` |
 | Transport recv     | 60 s wall time, enforced in `AgentConnection._recv`    |
-| Transport line size | 16 MiB max NDJSON line, enforced via `create_subprocess_exec(..., limit=...)` |
 
 Exceeding a size limit truncates the response and sets `truncated: true`
 rather than failing. Tested by `test_list_dir_truncates_at_max_entries`,
