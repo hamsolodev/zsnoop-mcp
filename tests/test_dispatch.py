@@ -152,8 +152,12 @@ def test_methods_table_is_what_we_expect() -> None:
         "find_files",
         "content_grep",
         "file_history",
+        "versions_of",
+        "file_diff",
         "snapshots_containing",
         "first_appearance",
+        "last_appearance",
+        "find_deleted",
         "size_delta",
     }
     assert set(agent.METHODS) == expected

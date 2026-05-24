@@ -89,8 +89,12 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "find_files",
         "content_grep",
         "file_history",
+        "versions_of",
+        "file_diff",
         "snapshots_containing",
         "first_appearance",
+        "last_appearance",
+        "find_deleted",
         "size_delta",
     }
 

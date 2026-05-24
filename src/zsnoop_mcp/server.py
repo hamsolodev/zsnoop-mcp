@@ -210,8 +210,59 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
 
         Each version reports ``present``, and if present also ``size`` and
         ``mtime``. Useful for tracking when a file changed or disappeared.
+        For *content*-level deduplication ("how many distinct versions
+        exist?") prefer ``versions_of``.
         """
         return await _call(host, "file_history", {"dataset": dataset, "path": path})
+
+    @mcp.tool()
+    async def versions_of(
+        host: str,
+        dataset: str,
+        path: str,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """List *distinct* versions of `path` across every snapshot of `dataset`.
+
+        Like ``file_history`` but deduplicated by content hash (SHA-256):
+        on a daily-snapshot dataset where a file rarely changes, this
+        collapses "365 entries, mostly identical" into "5 distinct
+        versions, here's when each appeared". Each version reports
+        ``first_seen``, ``last_seen``, and the full list of snapshots
+        that share its hash.
+
+        Each side is hashed up to ``max_bytes`` (default 1 MiB, capped at
+        4 MiB). Larger files are fingerprinted by their prefix; the
+        per-version ``truncated`` flag is set so two versions with the
+        same prefix-hash but differing tails are flagged.
+        """
+        params: dict[str, Any] = {"dataset": dataset, "path": path}
+        if max_bytes is not None:
+            params["max_bytes"] = max_bytes
+        return await _call(host, "versions_of", params)
+
+    @mcp.tool()
+    async def file_diff(
+        host: str,
+        snap_a: str,
+        snap_b: str,
+        path: str,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Unified diff of `path` between two snapshots, ``snap_a`` -> ``snap_b``.
+
+        Returns ``{diff, identical, encoding, present_in_a, present_in_b,
+        size_a, size_b, truncated_a, truncated_b}``. ``encoding`` is
+        ``"utf-8"`` for textual diffs, ``"binary"`` when either side
+        isn't UTF-8 (the ``diff`` field is empty but ``identical`` is
+        still answered by SHA-256), and ``"missing"`` when both sides
+        are absent. Each side reads up to ``max_bytes`` (default 1 MiB,
+        capped at 4 MiB).
+        """
+        params: dict[str, Any] = {"snap_a": snap_a, "snap_b": snap_b, "path": path}
+        if max_bytes is not None:
+            params["max_bytes"] = max_bytes
+        return await _call(host, "file_diff", params)
 
     @mcp.tool()
     async def snapshots_containing(
@@ -242,6 +293,48 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
     async def first_appearance(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Return the earliest snapshot of `dataset` in which `path` exists, or null."""
         return await _call(host, "first_appearance", {"dataset": dataset, "path": path})
+
+    @mcp.tool()
+    async def last_appearance(host: str, dataset: str, path: str) -> dict[str, Any]:
+        """Return the *latest* snapshot of `dataset` in which `path` exists, or null.
+
+        Mirror of ``first_appearance``. Compare with the dataset's most
+        recent snapshot to answer "when did this file disappear?".
+        """
+        return await _call(host, "last_appearance", {"dataset": dataset, "path": path})
+
+    @mcp.tool()
+    async def find_deleted(
+        host: str,
+        dataset: str,
+        after: str | None = None,
+        before: str | None = None,
+        max_results: int | None = None,
+    ) -> dict[str, Any]:
+        """Paths deleted between an earlier snapshot in a window and a later one.
+
+        Resolves ``from_snapshot`` to the earliest snapshot at or after
+        ``after`` (or earliest overall) and ``to_snapshot`` to the latest
+        snapshot at or before ``before`` (or latest overall), then runs
+        ``zfs diff`` between them and returns the entries with op ``-``.
+
+        ``after`` and ``before`` accept ISO 8601 timestamps OR phrases like
+        ``yesterday``, ``last week``. Bounded by ``max_results`` (default
+        1000, capped at 10 000); ``truncated=true`` when exceeded.
+        """
+        try:
+            after_iso = maybe_to_iso(after)
+            before_iso = maybe_to_iso(before)
+        except TimePhraseError as e:
+            raise ValueError(f"could not parse time phrase: {e}") from e
+        params: dict[str, Any] = {
+            "dataset": dataset,
+            "after": after_iso,
+            "before": before_iso,
+        }
+        if max_results is not None:
+            params["max_results"] = max_results
+        return await _call(host, "find_deleted", params)
 
     @mcp.tool()
     async def size_delta(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:

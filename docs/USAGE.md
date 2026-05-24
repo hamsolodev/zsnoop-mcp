@@ -33,13 +33,25 @@ of `+`/`-`/`M`/`R` paths.
 
 > "When did `/home/youruser/.zshrc` last change?"
 
-LLM walks `file_history(dataset="rpool/home/youruser", path=".zshrc")` and reports
-adjacent versions whose mtimes (or sizes) differ.
+`versions_of(dataset="rpool/home/youruser", path=".zshrc")` collapses every
+snapshot's copy into one entry per distinct content (SHA-256). The
+gap between consecutive versions' `first_seen` timestamps is the answer.
+Cheaper than walking `file_history` and comparing sizes/mtimes when the
+file is in a daily-snapshot dataset and rarely changes.
+
+> "Show me the diff between the version of `/etc/foo.conf` from last week
+> and today's."
+
+`file_diff(snap_a=<last week's daily>, snap_b=<latest>, path="etc/foo.conf")`
+returns a unified diff in one call (no need to `read_file` twice and
+diff locally). Binary files report `encoding="binary"` with a still-correct
+`identical` boolean.
 
 > "Which snapshot first introduced `~/.config/zsnoop-mcp/hosts.toml`?"
 
 `first_appearance(dataset="rpool/home/youruser", path=".config/zsnoop-mcp/hosts.toml")`
 returns the earliest snapshot containing it, with creation timestamp.
+Symmetric `last_appearance` answers "when did this file *disappear*?".
 
 ## Forensics — "what was on the box when Y broke?"
 
@@ -57,6 +69,13 @@ LLM enumerates the recent snapshot list, then calls `content_grep` on each.
 > started yesterday and now?"
 
 `snapshots_containing(... after="yesterday", before="now")`.
+
+> "What got deleted in `rpool/home/youruser` in the last week?"
+
+`find_deleted(dataset="rpool/home/youruser", after="last week")` resolves
+the earliest snapshot in the window and the latest snapshot overall,
+runs `zfs diff` between them, and returns just the `-` entries. Bounded
+by `max_results`.
 
 ## Storage / housekeeping
 

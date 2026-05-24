@@ -398,6 +398,250 @@ def test_first_appearance_returns_earliest(
     assert result["first"]["snapshot"] == mock_mountpoint["snapshot_name"]
 
 
+# ---- last_appearance -------------------------------------------------------
+
+
+def test_last_appearance_returns_latest(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    _setup_history_fake(fake_zfs, mock_mountpoint)
+    result = agent.m_last_appearance({"dataset": "testpool/test", "path": "hello.txt"})
+    assert result["last"] is not None
+    assert result["last"]["snapshot"] == mock_mountpoint["snapshot_name"]
+
+
+def test_last_appearance_returns_null_when_absent(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    _setup_history_fake(fake_zfs, mock_mountpoint)
+    result = agent.m_last_appearance(
+        {"dataset": "testpool/test", "path": "never_existed"},
+    )
+    assert result["last"] is None
+
+
+# ---- file_diff -------------------------------------------------------------
+
+
+def test_file_diff_identical_self_compare(mock_mountpoint: dict[str, Any]) -> None:
+    """Diffing a snapshot against itself reports identical with empty diff."""
+    snap = mock_mountpoint["snapshot_name"]
+    result = agent.m_file_diff(
+        {"snap_a": snap, "snap_b": snap, "path": "hello.txt"},
+    )
+    assert result["identical"] is True
+    assert result["diff"] == ""
+    assert result["encoding"] == "utf-8"
+    assert result["present_in_a"] is True
+    assert result["present_in_b"] is True
+    assert result["size_a"] == result["size_b"]
+
+
+def test_file_diff_missing_in_a_shows_full_addition(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    snap = mock_mountpoint["snapshot_name"]
+    result = agent.m_file_diff(
+        {"snap_a": snap, "snap_b": snap, "path": "never_existed"},
+    )
+    # Both missing: identical (vacuously true), encoding="missing", empty diff.
+    assert result["present_in_a"] is False
+    assert result["present_in_b"] is False
+    assert result["identical"] is True
+    assert result["encoding"] == "missing"
+
+
+def test_file_diff_binary_skips_textual_diff(mock_mountpoint: dict[str, Any]) -> None:
+    snap = mock_mountpoint["snapshot_name"]
+    result = agent.m_file_diff(
+        {"snap_a": snap, "snap_b": snap, "path": "big.bin"},
+    )
+    assert result["encoding"] == "binary"
+    assert result["diff"] == ""
+    # Identical via byte comparison even though we can't render the diff.
+    assert result["identical"] is True
+
+
+def test_file_diff_truncation_flag(mock_mountpoint: dict[str, Any]) -> None:
+    snap = mock_mountpoint["snapshot_name"]
+    result = agent.m_file_diff(
+        {"snap_a": snap, "snap_b": snap, "path": "big.bin", "max_bytes": 1024},
+    )
+    assert result["truncated_a"] is True
+    assert result["truncated_b"] is True
+
+
+def test_file_diff_actually_diffs_different_content(
+    snapshot_tree: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    fake_zfs: FakeZfs,
+) -> None:
+    """Two different snapshots of the same file: unified diff has +/- lines."""
+    # Build a sibling snapshot tree with a modified hello.txt.
+    snap2_root = snapshot_tree["mountpoint"] / ".zfs" / "snapshot" / "snap2"
+    snap2_root.mkdir()
+    (snap2_root / "hello.txt").write_text("hello, world!\nplus an extra line\n")
+    # Wire the same mountpoint for both snapshots (same dataset).
+    fake_zfs.add(
+        ["get", "-H", "-p", "-o", "value", "mountpoint", "testpool/test"],
+        f"{snapshot_tree['mountpoint']}\n",
+    )
+    result = agent.m_file_diff(
+        {
+            "snap_a": "testpool/test@snap1",
+            "snap_b": "testpool/test@snap2",
+            "path": "hello.txt",
+        },
+    )
+    assert result["identical"] is False
+    assert result["encoding"] == "utf-8"
+    assert "+plus an extra line\n" in result["diff"]
+
+
+# ---- versions_of -----------------------------------------------------------
+
+
+def test_versions_of_single_snapshot(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    _setup_history_fake(fake_zfs, mock_mountpoint)
+    result = agent.m_versions_of(
+        {"dataset": "testpool/test", "path": "hello.txt"},
+    )
+    assert len(result["versions"]) == 1
+    v = result["versions"][0]
+    assert "sha256" in v
+    assert v["size"] == len("hello, world!\n")
+    assert v["truncated"] is False
+    assert len(v["snapshots"]) == 1
+
+
+def test_versions_of_dedupes_identical_snapshots(
+    snapshot_tree: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """Two snapshots with identical hello.txt collapse to one version."""
+    snap2_root = snapshot_tree["mountpoint"] / ".zfs" / "snapshot" / "snap2"
+    snap2_root.mkdir()
+    (snap2_root / "hello.txt").write_text("hello, world!\n")  # same content
+    fake_zfs.add(
+        ["get", "-H", "-p", "-o", "value", "mountpoint", "testpool/test"],
+        f"{snapshot_tree['mountpoint']}\n",
+    )
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "testpool/test",
+        ],
+        "testpool/test@snap1\t1700000000\t10\t1000\ntestpool/test@snap2\t1700000100\t10\t1000\n",
+    )
+    result = agent.m_versions_of(
+        {"dataset": "testpool/test", "path": "hello.txt"},
+    )
+    assert len(result["versions"]) == 1
+    v = result["versions"][0]
+    assert len(v["snapshots"]) == 2
+    assert v["first_seen"]["creation"] == 1700000000
+    assert v["last_seen"]["creation"] == 1700000100
+
+
+def test_versions_of_marks_truncated_when_over_cap(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    _setup_history_fake(fake_zfs, mock_mountpoint)
+    result = agent.m_versions_of(
+        {"dataset": "testpool/test", "path": "big.bin", "max_bytes": 1024},
+    )
+    assert result["truncated"] is True
+    assert result["versions"][0]["truncated"] is True
+
+
+# ---- find_deleted ----------------------------------------------------------
+
+
+def test_find_deleted_empty_when_only_one_snapshot(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """A window containing one snapshot has nothing to diff against."""
+    _setup_history_fake(fake_zfs, mock_mountpoint)
+    result = agent.m_find_deleted({"dataset": "testpool/test"})
+    assert result["deleted"] == []
+    assert result["from_snapshot"] == mock_mountpoint["snapshot_name"]
+    assert result["to_snapshot"] == mock_mountpoint["snapshot_name"]
+
+
+def test_find_deleted_filters_to_minus_ops(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    """A diff containing -/+/M entries returns only the -."""
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "testpool/test",
+        ],
+        "testpool/test@old\t1700000000\t10\t1000\ntestpool/test@new\t1700000100\t10\t1000\n",
+    )
+    fake_zfs.add(
+        ["diff", "-H", "-F", "testpool/test@old", "testpool/test@new"],
+        "-\tF\t/home/youruser/gone.txt\n"
+        "M\tF\t/home/youruser/changed.txt\n"
+        "+\tF\t/home/youruser/added.txt\n",
+    )
+    result = agent.m_find_deleted({"dataset": "testpool/test"})
+    assert [d["path"] for d in result["deleted"]] == ["/home/youruser/gone.txt"]
+    assert result["from_snapshot"] == "testpool/test@old"
+    assert result["to_snapshot"] == "testpool/test@new"
+
+
+def test_find_deleted_truncates(
+    mock_mountpoint: dict[str, Any],
+    fake_zfs: FakeZfs,
+) -> None:
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "testpool/test",
+        ],
+        "testpool/test@old\t1700000000\t10\t1000\ntestpool/test@new\t1700000100\t10\t1000\n",
+    )
+    fake_zfs.add(
+        ["diff", "-H", "-F", "testpool/test@old", "testpool/test@new"],
+        "-\tF\t/a\n-\tF\t/b\n-\tF\t/c\n",
+    )
+    result = agent.m_find_deleted(
+        {"dataset": "testpool/test", "max_results": 2},
+    )
+    assert len(result["deleted"]) == 2
+    assert result["truncated"] is True
+
+
 # ---- size_delta -------------------------------------------------------------
 
 

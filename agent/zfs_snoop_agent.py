@@ -17,7 +17,9 @@ This agent is read-only by construction:
 from __future__ import annotations
 
 import base64
+import difflib
 import fnmatch
+import hashlib
 import json
 import logging
 import os
@@ -57,6 +59,20 @@ DEFAULT_DIR_ENTRIES: Final = 1_000
 DEFAULT_FIND_RESULTS: Final = 100
 DEFAULT_GREP_RESULTS: Final = 100
 DEFAULT_SIZE_WALK_ENTRIES: Final = 100_000
+# `find_deleted` returns a bounded list of paths removed between two snapshots
+# of a dataset. Uses the same cap shape as list_dir.
+MAX_DELETED_RESULTS: Final = 10_000
+DEFAULT_DELETED_RESULTS: Final = 1_000
+# Per-version content hashing in `versions_of` reads up to this many bytes
+# from each snapshot's copy of the file. Files larger than this hash as
+# "first N bytes" — the version's `truncated` flag is set so callers can
+# treat the hash as a fingerprint of the prefix, not the whole file.
+MAX_VERSION_HASH_BYTES: Final = 4 * 1024 * 1024
+DEFAULT_VERSION_HASH_BYTES: Final = 1 * 1024 * 1024
+# `file_diff` reads each side of the comparison up to this many bytes. Same
+# cap shape as read_file because the underlying read is the same operation.
+MAX_DIFF_BYTES: Final = 4 * 1024 * 1024
+DEFAULT_DIFF_BYTES: Final = 1 * 1024 * 1024
 
 # Subprocess wall-clock timeout for any single zfs invocation.
 ZFS_TIMEOUT_SECONDS: Final = 30.0
@@ -258,6 +274,9 @@ class Limits:
     max_find_results: int = MAX_FIND_RESULTS
     max_grep_results: int = MAX_GREP_RESULTS
     max_size_walk_entries: int = MAX_SIZE_WALK_ENTRIES
+    max_deleted_results: int = MAX_DELETED_RESULTS
+    max_version_hash_bytes: int = MAX_VERSION_HASH_BYTES
+    max_diff_bytes: int = MAX_DIFF_BYTES
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
 
@@ -273,6 +292,9 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_find_results": MAX_FIND_RESULTS,
             "max_grep_results": MAX_GREP_RESULTS,
             "max_size_walk_entries": MAX_SIZE_WALK_ENTRIES,
+            "max_deleted_results": MAX_DELETED_RESULTS,
+            "max_version_hash_bytes": MAX_VERSION_HASH_BYTES,
+            "max_diff_bytes": MAX_DIFF_BYTES,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
         },
@@ -736,6 +758,227 @@ def m_first_appearance(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def m_last_appearance(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the *latest* snapshot of *dataset* containing *path*, or null.
+
+    Mirror of :func:`m_first_appearance`. Useful for answering "when did
+    this file disappear?" — compare the result to the dataset's most
+    recent snapshot.
+    """
+    dataset = validate_dataset(_require_str(params, "dataset"))
+    path = _require_str(params, "path")
+    history = m_file_history({"dataset": dataset, "path": path})["versions"]
+    present = sorted(
+        (v for v in history if v["present"] and v["creation"] is not None),
+        key=lambda v: v["creation"],
+    )
+    return {
+        "dataset": dataset,
+        "path": path,
+        "last": present[-1] if present else None,
+    }
+
+
+def m_file_diff(params: dict[str, Any]) -> dict[str, Any]:
+    """Unified diff of *path* between two snapshots, ``snap_a`` -> ``snap_b``.
+
+    Each side is read up to ``max_bytes`` (default 1 MiB; capped at
+    ``MAX_DIFF_BYTES`` = 4 MiB). If a side is missing, the diff shows the
+    full added/removed content. If either side is non-UTF-8, the diff is
+    empty and ``encoding`` is reported as ``"binary"`` — the response
+    still tells you whether the contents are identical (by SHA-256) and
+    the two sizes, so a binary "did anything change?" question is
+    answerable without the textual diff.
+    """
+    snap_a = _require_str(params, "snap_a")
+    snap_b = _require_str(params, "snap_b")
+    path = _require_str(params, "path")
+    max_bytes = validate_positive_int(
+        params.get("max_bytes"),
+        name="max_bytes",
+        default=DEFAULT_DIFF_BYTES,
+        hard_max=MAX_DIFF_BYTES,
+    )
+    validate_snapshot(snap_a)
+    validate_snapshot(snap_b)
+    side_a = _read_for_diff(snap_a, path, max_bytes)
+    side_b = _read_for_diff(snap_b, path, max_bytes)
+    # Identical when both present and bytes match, OR both missing.
+    if side_a["data"] is None and side_b["data"] is None:
+        identical = True
+        encoding = "missing"
+        diff_text = ""
+    else:
+        identical = (
+            side_a["data"] is not None
+            and side_b["data"] is not None
+            and side_a["data"] == side_b["data"]
+        )
+        text_a = _try_decode(side_a["data"])
+        text_b = _try_decode(side_b["data"])
+        if text_a is None or text_b is None:
+            encoding = "binary"
+            diff_text = ""
+        else:
+            encoding = "utf-8"
+            diff_text = "".join(
+                difflib.unified_diff(
+                    text_a.splitlines(keepends=True),
+                    text_b.splitlines(keepends=True),
+                    fromfile=f"a/{path}",
+                    tofile=f"b/{path}",
+                ),
+            )
+    return {
+        "snap_a": snap_a,
+        "snap_b": snap_b,
+        "path": path,
+        "present_in_a": side_a["data"] is not None,
+        "present_in_b": side_b["data"] is not None,
+        "size_a": side_a["size"],
+        "size_b": side_b["size"],
+        "truncated_a": side_a["truncated"],
+        "truncated_b": side_b["truncated"],
+        "identical": identical,
+        "encoding": encoding,
+        "diff": diff_text,
+    }
+
+
+def m_find_deleted(params: dict[str, Any]) -> dict[str, Any]:
+    """Paths deleted between an earlier snapshot in a window and a later one.
+
+    Selects ``from_snapshot`` as the earliest snapshot of *dataset* at or
+    after the ``after`` time (or the earliest overall if ``after`` is
+    omitted). Selects ``to_snapshot`` as the latest snapshot at or before
+    ``before`` (or the latest overall). Then runs ``zfs diff`` between the
+    two and returns the entries with op ``-`` (removed).
+
+    Useful for "what was deleted on this dataset since yesterday?" without
+    having to call :func:`m_diff_snapshots` and manually filter the result.
+    """
+    dataset = validate_dataset(_require_str(params, "dataset"))
+    after = params.get("after")
+    before = params.get("before")
+    after_ts = _iso_to_ts(after, name="after")
+    before_ts = _iso_to_ts(before, name="before")
+    max_results = validate_positive_int(
+        params.get("max_results"),
+        name="max_results",
+        default=DEFAULT_DELETED_RESULTS,
+        hard_max=MAX_DELETED_RESULTS,
+    )
+    snaps = m_list_snapshots({"dataset": dataset})["snapshots"]
+    in_window = [
+        s
+        for s in snaps
+        if (after_ts is None or s["creation"] >= after_ts)
+        and (before_ts is None or s["creation"] <= before_ts)
+    ]
+    if not in_window:
+        return {
+            "dataset": dataset,
+            "from_snapshot": None,
+            "to_snapshot": None,
+            "deleted": [],
+            "truncated": False,
+        }
+    from_snap = min(in_window, key=lambda s: s["creation"])
+    to_snap = max(in_window, key=lambda s: s["creation"])
+    if from_snap["name"] == to_snap["name"]:
+        # Single-snapshot window: nothing to diff against.
+        return {
+            "dataset": dataset,
+            "from_snapshot": from_snap["name"],
+            "to_snapshot": to_snap["name"],
+            "deleted": [],
+            "truncated": False,
+        }
+    diff = m_diff_snapshots({"snap_a": from_snap["name"], "snap_b": to_snap["name"]})
+    deleted: list[dict[str, Any]] = []
+    truncated = False
+    for change in diff["changes"]:
+        if change["op"] != "-":
+            continue
+        if len(deleted) >= max_results:
+            truncated = True
+            break
+        deleted.append({"path": change["path"], "type": change["type"]})
+    return {
+        "dataset": dataset,
+        "from_snapshot": from_snap["name"],
+        "to_snapshot": to_snap["name"],
+        "deleted": deleted,
+        "truncated": truncated,
+    }
+
+
+def m_versions_of(params: dict[str, Any]) -> dict[str, Any]:
+    """List *distinct* versions of *path* across every snapshot of *dataset*.
+
+    Like :func:`m_file_history` but deduplicated by content hash. On a
+    daily-snapshot dataset where a file rarely changes this collapses
+    "365 entries, mostly identical" into "5 distinct versions, here's
+    when each appeared".
+
+    Content is hashed (SHA-256) up to ``max_bytes`` per version (default
+    1 MiB; capped at 4 MiB). Files larger than ``max_bytes`` are
+    fingerprinted by their prefix only — the per-version ``truncated``
+    flag is set so callers know two versions with the same prefix-hash
+    may actually differ past the cap.
+    """
+    dataset = validate_dataset(_require_str(params, "dataset"))
+    path = _require_str(params, "path")
+    max_bytes = validate_positive_int(
+        params.get("max_bytes"),
+        name="max_bytes",
+        default=DEFAULT_VERSION_HASH_BYTES,
+        hard_max=MAX_VERSION_HASH_BYTES,
+    )
+    history = m_file_history({"dataset": dataset, "path": path})["versions"]
+    versions: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}  # sha256 -> index in `versions`
+    any_truncated = False
+    for v in history:
+        if not v["present"] or v.get("is_symlink"):
+            continue
+        snap = v["snapshot"]
+        side = _read_for_diff(snap, path, max_bytes)
+        if side["data"] is None:
+            continue
+        digest = hashlib.sha256(side["data"]).hexdigest()
+        ref = {"snapshot": snap, "creation": v["creation"]}
+        if digest in seen:
+            versions[seen[digest]]["snapshots"].append(ref)
+        else:
+            seen[digest] = len(versions)
+            versions.append(
+                {
+                    "sha256": digest,
+                    "size": side["size"],
+                    "truncated": side["truncated"],
+                    "first_seen": ref,
+                    "last_seen": ref,
+                    "snapshots": [ref],
+                }
+            )
+        if side["truncated"]:
+            any_truncated = True
+    # Sort each version's snapshot list, set first/last by creation time.
+    for version in versions:
+        version["snapshots"].sort(key=lambda s: s["creation"] or 0)
+        if version["snapshots"]:
+            version["first_seen"] = version["snapshots"][0]
+            version["last_seen"] = version["snapshots"][-1]
+    versions.sort(key=lambda x: x["first_seen"]["creation"] or 0)
+    return {
+        "dataset": dataset,
+        "path": path,
+        "versions": versions,
+        "truncated": any_truncated,
+    }
+
+
 def m_size_delta(params: dict[str, Any]) -> dict[str, Any]:
     """Return the bytes written between *snap_a* and *snap_b* of the same dataset."""
     snap_a = _require_str(params, "snap_a")
@@ -765,8 +1008,12 @@ METHODS: Final[dict[str, Any]] = {
     "find_files": m_find_files,
     "content_grep": m_content_grep,
     "file_history": m_file_history,
+    "versions_of": m_versions_of,
+    "file_diff": m_file_diff,
     "snapshots_containing": m_snapshots_containing,
     "first_appearance": m_first_appearance,
+    "last_appearance": m_last_appearance,
+    "find_deleted": m_find_deleted,
     "size_delta": m_size_delta,
 }
 
@@ -847,6 +1094,44 @@ def _iso_to_ts(value: object, *, name: str) -> int | None:
     except ValueError as e:
         raise InvalidParams(f"{name} is not a valid ISO 8601 timestamp: {e}") from e
     return int(dt.timestamp())
+
+
+def _read_for_diff(snapshot: str, path: str, max_bytes: int) -> dict[str, Any]:
+    """Read *path* from *snapshot* up to *max_bytes*.
+
+    Returns ``{data, size, truncated}``. ``data`` is ``None`` if the path
+    doesn't exist, is a symlink, or isn't a regular file — the caller
+    decides how to render those cases. Symlinks are never followed (G3);
+    a path that resolves to a symlink is treated the same as missing for
+    diff purposes (we can't meaningfully diff a link target the caller
+    didn't ask about).
+    """
+    try:
+        _, target = resolve_under_snapshot(snapshot, path)
+    except (PathError, ZfsError):
+        return {"data": None, "size": None, "truncated": False}
+    try:
+        st = target.lstat()
+    except OSError:
+        return {"data": None, "size": None, "truncated": False}
+    if not stat_mod.S_ISREG(st.st_mode):
+        return {"data": None, "size": None, "truncated": False}
+    try:
+        with target.open("rb") as fh:
+            data = fh.read(max_bytes)
+    except OSError:
+        return {"data": None, "size": None, "truncated": False}
+    return {"data": data, "size": st.st_size, "truncated": st.st_size > len(data)}
+
+
+def _try_decode(data: bytes | None) -> str | None:
+    """Decode *data* as UTF-8 or return None on failure (or None input)."""
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 # ----------------------------------------------------------------------------

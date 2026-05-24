@@ -74,6 +74,9 @@ symlink at all. Tests:
 | `list_dir` | `max_entries`, default 1000, server-capped at 10 000 |
 | `size_breakdown` | `max_entries`, default 100 000, server-capped at 1 000 000; plus 30 s wall time |
 | `find_files` / `content_grep` | `max_results`, default 100, capped at 1000 |
+| `file_diff` | `max_bytes` per side, default 1 MiB, capped at 4 MiB |
+| `versions_of` | `max_bytes` per snapshot, default 1 MiB, capped at 4 MiB |
+| `find_deleted` | `max_results`, default 1000, capped at 10 000 |
 | Per `zfs` subprocess | 30 s wall time |
 | Transport recv | 60 s wall time |
 

@@ -44,8 +44,9 @@ The agent dispatches RPCs through an **explicit `METHODS` allowlist** in
 
 Allowlist (read-only): `agent_info`, `list_pools`, `list_datasets`,
 `list_snapshots`, `diff_snapshots`, `list_dir`, `size_breakdown`,
-`read_file`, `find_files`, `content_grep`, `file_history`,
-`snapshots_containing`, `first_appearance`, `size_delta`.
+`read_file`, `find_files`, `content_grep`, `file_history`, `versions_of`,
+`file_diff`, `snapshots_containing`, `first_appearance`,
+`last_appearance`, `find_deleted`, `size_delta`.
 
 Adding a mutating method requires editing the agent source — there is no
 configuration knob that turns mutation on. The test
@@ -93,6 +94,9 @@ all; symlinks are reported with their target string as data. Tests:
 | `size_breakdown`   | `max_entries` (default 100 000, server-capped at 1 000 000); 30 s wall time |
 | `find_files`       | `max_results` (default 100, server-capped at 1000)     |
 | `content_grep`     | `max_results` (default 100, server-capped at 1000)     |
+| `file_diff`        | `max_bytes` per side (default 1 MiB, server-capped at 4 MiB) |
+| `versions_of`      | `max_bytes` per snapshot read (default 1 MiB, server-capped at 4 MiB) |
+| `find_deleted`     | `max_results` (default 1000, server-capped at 10 000)  |
 | Per zfs subprocess | 30 s wall time, enforced via `subprocess.run(timeout=)` |
 | Transport recv     | 60 s wall time, enforced in `AgentConnection._recv`    |
 

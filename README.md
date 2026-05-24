@@ -64,8 +64,12 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `find_files`           | `fnmatch` name search inside a snapshot                  |
 | `content_grep`         | Regex content search inside a snapshot                   |
 | `file_history`         | Every snapshot's version of a given file in a dataset    |
+| `versions_of`          | `file_history` deduped by content hash (distinct versions only) |
+| `file_diff`            | Unified diff of one file across two snapshots            |
 | `snapshots_containing` | Snapshots in which a path currently exists (time-ranged) |
 | `first_appearance`     | Earliest snapshot containing a path                      |
+| `last_appearance`      | Latest snapshot containing a path (answers "when did X disappear?") |
+| `find_deleted`         | Paths deleted between two snapshots in a time window     |
 | `size_delta`           | Bytes written between two snapshots of one dataset       |
 
 Time-range parameters accept ISO 8601 *or* human phrases — `yesterday`,
