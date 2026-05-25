@@ -6,7 +6,7 @@ and with the test that asserts the behaviour.
 > **AI-assisted authorship.** Most of this codebase was drafted by
 > [Claude Code](https://claude.com/claude-code) under human review (see
 > "About this codebase" in the project
-> [README]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/README.md)).
+> [README](https://github.com/hamsolodev/zsnoop-mcp/blob/main/README.md)).
 > The security-critical invariants below — the method allowlist, the
 > no-shell guarantee, path confinement, bounded reads — were specified
 > by the human author and are enforced by tests that fail loudly if any

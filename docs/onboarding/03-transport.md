@@ -2,7 +2,7 @@
 
 ## What
 
-[`src/zsnoop_mcp/transport.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/transport.py) — the
+[`src/zsnoop_mcp/transport.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/src/zsnoop_mcp/transport.py) — the
 async layer that owns one persistent subprocess per host, frames JSON-RPC
 over its stdio, and reconnects on failure.
 
@@ -106,7 +106,7 @@ The state machine, simplified:
 ```
 
 Implementation highlights from
-[transport.py]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/transport.py):
+[transport.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/src/zsnoop_mcp/transport.py):
 
 ```python
 class AgentConnection:
@@ -144,7 +144,7 @@ A real bug we hit (and have a test for): the agent dies on a stripped env
 (e.g. no `SSH_AUTH_SOCK`); SSH writes `Permission denied (publickey)` to
 stderr; we previously swallowed that and reported a useless "agent
 unreachable". The fix lives in
-[`_capture_remaining_stderr`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/src/zsnoop_mcp/transport.py):
+[`_capture_remaining_stderr`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/src/zsnoop_mcp/transport.py):
 
 ```python
 async def _capture_remaining_stderr(self) -> str:
@@ -166,7 +166,7 @@ async def _capture_remaining_stderr(self) -> str:
 The drainer task itself appends to a bounded tail (max 50 lines) AND logs.
 On failure we wait briefly for the drainer to flush, then return whatever
 landed. Test:
-[`test_transport_local_stderr.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_transport_local_stderr.py).
+[`test_transport_local_stderr.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_transport_local_stderr.py).
 
 ### `ConnectionPool` — many hosts, one connection each
 
