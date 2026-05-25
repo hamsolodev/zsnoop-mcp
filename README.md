@@ -123,7 +123,15 @@ agent only sees absolute ISO 8601 timestamps.
 
 ## Install
 
-### From a clone (dev / current path)
+### From PyPI (recommended)
+
+```sh
+uv tool install zsnoop-mcp    # or: pipx install zsnoop-mcp / pip install zsnoop-mcp
+```
+
+Run it with `zsnoop-mcp`.
+
+### From a clone (for hacking on the code)
 
 ```sh
 git clone https://github.com/hamsolodev/zsnoop-mcp.git
@@ -131,14 +139,10 @@ cd zsnoop-mcp
 uv sync
 ```
 
-### From PyPI
+Run it with `uv run zsnoop-mcp` from the checkout.
 
-```sh
-uv tool install zsnoop-mcp    # or: pip install zsnoop-mcp
-```
-
-See [docs/PUBLISHING.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/PUBLISHING.md) for the per-release flow
-(version bump → tag → CI publishes via OIDC).
+See [docs/PUBLISHING.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/PUBLISHING.md)
+for the per-release flow (version bump → tag → CI publishes via OIDC).
 
 ## Configure
 
@@ -174,32 +178,33 @@ mode for reading root-owned snapshot files.
 
 ## Wire into Claude Code
 
-Add to `~/.claude/settings.json`:
+After `uv tool install zsnoop-mcp`:
+
+```sh
+claude mcp add zsnoop --scope user -- zsnoop-mcp
+```
+
+That writes the entry directly to your Claude Code config; no JSON
+editing needed. Restart your Claude Code session; the tools appear
+under the `zsnoop` namespace.
+
+If you're running from a worktree instead of an installed binary, point
+the command at `uv run --directory <path>` instead:
+
+```sh
+claude mcp add zsnoop --scope user -- \
+    uv run --directory ~/path/to/zsnoop-mcp zsnoop-mcp
+```
+
+Or, if you'd rather edit `~/.claude/settings.json` by hand:
 
 ```jsonc
 {
   "mcpServers": {
-    "zsnoop": {
-      "command": "uv",
-      "args": ["run", "--directory", "/home/youruser/Documents/worktrees/zsnoop-mcp", "zsnoop-mcp"]
-    }
+    "zsnoop": { "command": "zsnoop-mcp" }
   }
 }
 ```
-
-Or, after PyPI install with `uv tool install zsnoop-mcp`:
-
-```jsonc
-{
-  "mcpServers": {
-    "zsnoop": {
-      "command": "zsnoop-mcp"
-    }
-  }
-}
-```
-
-Restart your Claude Code session; the tools appear under the `zsnoop` namespace.
 
 ## Use
 
