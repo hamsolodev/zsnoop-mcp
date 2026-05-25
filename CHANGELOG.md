@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`zfs diff` timed out on high-churn datasets** (#7). The agent's
+  global `ZFS_TIMEOUT_SECONDS = 30 s` applied to every zfs/zpool
+  subprocess uniformly, but `zfs diff` between two snapshots of a busy
+  multi-TB dataset routinely runs longer. Introduce a separate
+  `ZFS_DIFF_TIMEOUT_SECONDS = 300 s` and plumb a per-call timeout
+  through `_run_cli`. `diff_snapshots` and `find_deleted` now use the
+  longer budget. New constant exposed via `agent_info.limits`.
+- **Transport line buffer was too small for large JSON-RPC responses**
+  (#8). NDJSON framing puts a whole response on one line; asyncio's
+  default 64 KiB `StreamReader` limit caused
+  `Separator is found, but chunk is longer than limit` errors when
+  `find_deleted` (and similar) returned anything near their default
+  result caps. The transport's `create_subprocess_exec` now sets
+  `limit=MAX_LINE_BYTES = 16 MiB`, big enough to clear every agent-side
+  hard cap.
+- **CI Python matrix was theatre.** The matrix labelled jobs `py3.11`,
+  `py3.12`, `py3.13` but every job actually ran tests on **3.11**, because
+  `uv sync` defaults to the lowest `requires-python`-compatible
+  interpreter and ignored the matrix-installed Python. Set
+  `UV_PYTHON: ${{ matrix.python }}` on the job; added a
+  `uv run python --version` step so a future regression is visible
+  in the log instead of silent.
+
+### Changed
+
+- **Documentation source-view links no longer use `mkdocs-macros`.**
+  The Jinja-style `{{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/…`
+  placeholders rendered correctly on the MkDocs site but appeared as
+  literal text when the same `.md` files were viewed directly on
+  github.com (which has no mkdocs to substitute them). Rewrote all
+  source-code links to absolute `https://github.com/hamsolodev/zsnoop-mcp/blob/main/…`
+  URLs and dropped the `mkdocs-macros-plugin` dev dependency and its
+  configuration in `mkdocs.yml`. Docs now look correct in both render
+  contexts simultaneously.
+- **README install order flipped:** PyPI install ("recommended")
+  appears before the worktree-clone path, which is now labelled as
+  "for hacking on the code".
+- **README "Wire into Claude Code" favors the programmatic `claude mcp
+  add` command** over the hand-edited `settings.json` JSON, which is
+  kept as a fallback below.
+
 ## [0.1.1] — 2026-05-24
 
 ### Fixed
