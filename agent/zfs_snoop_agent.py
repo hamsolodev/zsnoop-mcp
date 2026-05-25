@@ -87,8 +87,13 @@ DEFAULT_STALE_RESULTS: Final = 1_000
 MAX_BISECT_BYTES: Final = 4 * 1024 * 1024
 DEFAULT_BISECT_BYTES: Final = 1 * 1024 * 1024
 
-# Subprocess wall-clock timeout for any single zfs invocation.
+# Subprocess wall-clock timeout for any single zfs / zpool invocation.
+# Suits metadata commands (list, get) which are essentially constant-time.
 ZFS_TIMEOUT_SECONDS: Final = 30.0
+# Longer wall-clock timeout for `zfs diff`, which walks every changed object
+# between two snapshots and can take minutes on a high-churn dataset. See
+# GH issue #7. `diff_snapshots` and `find_deleted` use this budget.
+ZFS_DIFF_TIMEOUT_SECONDS: Final = 300.0
 # Wall-clock cap on a single size_breakdown walk. Belt-and-braces against
 # pathological cache-cold filesystems where the entry budget alone is too
 # loose. Truncates with `truncated: true` rather than failing.
@@ -243,28 +248,35 @@ def resolve_under_snapshot(snapshot: str, user_path: str) -> tuple[Path, Path]:
 # ----------------------------------------------------------------------------
 
 
-def run_zfs(args: list[str]) -> str:
-    """Run ``zfs`` with *args*, return stdout, raise on error or timeout."""
-    return _run_cli("zfs", args)
+def run_zfs(args: list[str], *, timeout: float | None = None) -> str:
+    """Run ``zfs`` with *args*, return stdout, raise on error or timeout.
+
+    *timeout* overrides ``ZFS_TIMEOUT_SECONDS``. Used by ``zfs diff``
+    callers to allow the longer ``ZFS_DIFF_TIMEOUT_SECONDS`` budget.
+    """
+    return _run_cli("zfs", args, timeout=timeout)
 
 
-def run_zpool(args: list[str]) -> str:
+def run_zpool(args: list[str], *, timeout: float | None = None) -> str:
     """Run ``zpool`` with *args*, return stdout, raise on error or timeout."""
-    return _run_cli("zpool", args)
+    return _run_cli("zpool", args, timeout=timeout)
 
 
-def _run_cli(binary: str, args: list[str]) -> str:
+def _run_cli(binary: str, args: list[str], *, timeout: float | None = None) -> str:
     cmd = [binary, *args]
+    effective_timeout = ZFS_TIMEOUT_SECONDS if timeout is None else timeout
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=ZFS_TIMEOUT_SECONDS,
+            timeout=effective_timeout,
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        raise AgentTimeoutError(f"{binary} {' '.join(args[:2])} timed out") from e
+        raise AgentTimeoutError(
+            f"{binary} {' '.join(args[:2])} timed out after {effective_timeout}s",
+        ) from e
     except FileNotFoundError as e:
         raise ZfsError(f"{binary} binary not found on PATH") from e
     if result.returncode != 0:
@@ -294,6 +306,7 @@ class Limits:
     max_stale_results: int = MAX_STALE_RESULTS
     max_bisect_bytes: int = MAX_BISECT_BYTES
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
+    zfs_diff_timeout_seconds: float = ZFS_DIFF_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
 
 
@@ -315,6 +328,7 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_stale_results": MAX_STALE_RESULTS,
             "max_bisect_bytes": MAX_BISECT_BYTES,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
+            "zfs_diff_timeout_seconds": ZFS_DIFF_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
         },
     }
@@ -662,7 +676,10 @@ def m_diff_snapshots(params: dict[str, Any]) -> dict[str, Any]:
     snap_b = _require_str(params, "snap_b")
     validate_snapshot(snap_a)
     validate_snapshot(snap_b)
-    out = run_zfs(["diff", "-H", "-F", snap_a, snap_b])
+    # `zfs diff` walks every changed object between the two snapshots and
+    # can take minutes on a high-churn dataset; use the longer per-call
+    # budget. See GH issue #7.
+    out = run_zfs(["diff", "-H", "-F", snap_a, snap_b], timeout=ZFS_DIFF_TIMEOUT_SECONDS)
     changes = []
     for line in out.splitlines():
         if not line:
