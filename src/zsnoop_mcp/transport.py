@@ -29,6 +29,16 @@ from zsnoop_mcp.config import Config, HostConfig
 log = logging.getLogger(__name__)
 
 
+# Maximum bytes the StreamReader on the agent's stdout / stderr will buffer
+# per readline() call. asyncio's default is 64 KiB; our NDJSON framing puts
+# a whole JSON-RPC response on a single line, so a `find_deleted` with a
+# default 1000 entries can easily exceed that. 16 MiB comfortably exceeds
+# every agent-side hard cap (4 MiB read_file, 10k list_dir entries, 1M
+# size-walk entries summarised to ~per-child rows) while still bounding
+# against a runaway agent. See GH issue #8.
+MAX_LINE_BYTES: int = 16 * 1024 * 1024
+
+
 # Default OpenSSH options layered before per-host overrides.
 DEFAULT_SSH_OPTIONS: tuple[str, ...] = (
     "-T",  # no remote TTY
@@ -239,6 +249,10 @@ class AgentConnection:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    # Raise the per-line buffer from asyncio's 64 KiB default
+                    # so large JSON-RPC responses fit on a single NDJSON line
+                    # (see MAX_LINE_BYTES + GH #8).
+                    limit=MAX_LINE_BYTES,
                 ),
                 timeout=self._spawn_timeout,
             )
