@@ -26,7 +26,10 @@ class FakeZfs:
     def add(self, args: list[str], stdout: str) -> None:
         self._responses[tuple(args)] = stdout
 
-    def __call__(self, args: list[str]) -> str:
+    def __call__(self, args: list[str], *, timeout: float | None = None) -> str:
+        # `timeout` accepted (per GH #7 plumbing) but ignored: this fake never
+        # actually waits, so we just record the call shape.
+        del timeout
         self.calls.append(tuple(args))
         try:
             return self._responses[tuple(args)]

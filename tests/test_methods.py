@@ -355,6 +355,44 @@ def test_diff_snapshots_parses_changes(fake_zfs: FakeZfs) -> None:
     assert rename["new_path"] == "/home/newname"
 
 
+def test_run_zfs_accepts_per_call_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pinning the GH #7 plumbing: an explicit timeout overrides the default."""
+    import subprocess as _subprocess  # noqa: PLC0415 - test-local import for monkeypatch target
+
+    captured: dict[str, Any] = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(*args: object, **kwargs: object) -> _FakeCompleted:
+        captured.update(kwargs)
+        return _FakeCompleted()
+
+    monkeypatch.setattr(_subprocess, "run", fake_run)
+    # Default timeout when not supplied.
+    agent.run_zfs(["list"])
+    assert captured["timeout"] == pytest.approx(agent.ZFS_TIMEOUT_SECONDS)
+    # Explicit per-call timeout flows through.
+    agent.run_zfs(["diff", "a@x", "a@y"], timeout=agent.ZFS_DIFF_TIMEOUT_SECONDS)
+    assert captured["timeout"] == pytest.approx(agent.ZFS_DIFF_TIMEOUT_SECONDS)
+
+
+def test_diff_snapshots_uses_diff_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``m_diff_snapshots`` must invoke run_zfs with the longer timeout budget."""
+    captured: dict[str, object] = {}
+
+    def fake_run_zfs(args: list[str], *, timeout: float | None = None) -> str:
+        captured["args"] = args
+        captured["timeout"] = timeout
+        return ""
+
+    monkeypatch.setattr(agent, "run_zfs", fake_run_zfs)
+    agent.m_diff_snapshots({"snap_a": "rpool/home@a", "snap_b": "rpool/home@b"})
+    assert captured["timeout"] == agent.ZFS_DIFF_TIMEOUT_SECONDS
+
+
 # ---- list_dir ---------------------------------------------------------------
 
 
