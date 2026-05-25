@@ -221,8 +221,17 @@ class AgentConnection:
         await self._send(request)
         response = await self._recv()
         if response.get("jsonrpc") != "2.0":
+            # Malformed frame; framing is desynced. Close so next call
+            # respawns clean.
+            await self._close_proc()
             raise TransportError(f"missing/invalid jsonrpc field: {response!r}")
         if response.get("id") != req_id:
+            # We got someone else's response — usually a leftover from an
+            # earlier oversized/garbled call that left the pipe with extra
+            # bytes. Reading further from this connection will keep
+            # returning stale ids. Tear down so next call gets a fresh
+            # agent. (See GH issue tracker for the original symptom.)
+            await self._close_proc()
             raise TransportError(
                 f"id mismatch on {self.name!r}: sent {req_id}, got {response.get('id')!r}",
             )
@@ -262,9 +271,15 @@ class AgentConnection:
 
     async def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None  # noqa: S101
+        # Capture the StreamReader locally. `_close_proc` sets `self._proc`
+        # to None *before* cancelling this task, so going through `self._proc`
+        # on every iteration would NPE if a close happens mid-readline.
+        # The local reference keeps reading from the original pipe until
+        # EOF (process death closes stderr) or the task is cancelled.
+        stderr = self._proc.stderr
         try:
             while True:
-                line = await self._proc.stderr.readline()
+                line = await stderr.readline()
                 if not line:
                     return
                 text = line.decode("utf-8", "replace").rstrip()
@@ -310,16 +325,38 @@ class AgentConnection:
         try:
             line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=self._recv_timeout)
         except TimeoutError as e:
+            # The agent is still alive and may finish later; don't tear down.
             raise TransportError(
                 f"agent on {self.name!r} did not respond within {self._recv_timeout}s",
+            ) from e
+        except ValueError as e:
+            # asyncio.StreamReader.readline() raises ValueError when a single
+            # line exceeds the buffer limit (MAX_LINE_BYTES). The internal
+            # buffer is then cleared (or trimmed past the separator), but the
+            # *remaining* bytes of the agent's oversized response still sit
+            # in the OS pipe — reading further would yield garbage or a
+            # stale next-response.
+            #
+            # Tear down the subprocess so `_ensure_alive` respawns it clean
+            # on the next call. Without this, a single oversized response
+            # corrupts the wire protocol and surfaces as
+            # `id mismatch on <host>: sent N, got M` on subsequent calls.
+            await self._close_proc()
+            raise TransportError(
+                f"agent on {self.name!r} emitted a line larger than {MAX_LINE_BYTES} bytes",
             ) from e
         if not line:
             raise EOFError(f"agent on {self.name!r} closed stdout")
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError as e:
+            # Garbage on stdout means our framing is desynced — same recovery
+            # as the oversize-line case: drop the connection so the next
+            # call respawns fresh.
+            await self._close_proc()
             raise TransportError(f"agent on {self.name!r} emitted non-JSON line: {line!r}") from e
         if not isinstance(parsed, dict):
+            await self._close_proc()
             raise TransportError(f"agent on {self.name!r} emitted non-object: {parsed!r}")
         return parsed
 

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from zsnoop_mcp.transport import (
+    MAX_LINE_BYTES,
     AgentConnection,
     AgentRpcError,
     TransportError,
@@ -40,6 +41,26 @@ async def test_agent_info_round_trip() -> None:
     assert result["limits"]["max_read_bytes"] > 0
 
 
+def _sized_response_agent(tmp_path: Path, *, payload_bytes: int) -> Path:
+    """Build a one-shot agent that responds with a `payload_bytes`-sized blob."""
+    script = tmp_path / f"sized_{payload_bytes}_agent.py"
+    script.write_text(
+        textwrap.dedent(f"""\
+            import json, sys
+            line = sys.stdin.readline()
+            req = json.loads(line)
+            payload = "x" * {payload_bytes}
+            sys.stdout.write(json.dumps({{
+                "jsonrpc": "2.0",
+                "id": req["id"],
+                "result": {{"payload": payload}},
+            }}) + "\\n")
+            sys.stdout.flush()
+        """),
+    )
+    return script
+
+
 async def test_large_response_exceeds_asyncio_default_line_buffer(tmp_path: Path) -> None:
     """A single JSON-RPC response larger than asyncio's default 64 KiB line
     buffer must round-trip. Regresses GH #8.
@@ -47,26 +68,71 @@ async def test_large_response_exceeds_asyncio_default_line_buffer(tmp_path: Path
     Uses a fabricated agent that synthesises a large payload, so the test
     doesn't depend on the real ZFS dataset shape.
     """
-    fake_agent = tmp_path / "fat_agent.py"
-    fake_agent.write_text(
-        textwrap.dedent("""
-        import json, sys
-        # 256 KiB of payload — well above asyncio's 64 KiB default, well
-        # below transport's MAX_LINE_BYTES.
-        big = "x" * (256 * 1024)
-        for line in sys.stdin:
-            try:
-                req = json.loads(line)
-            except Exception:
-                continue
-            resp = {"jsonrpc": "2.0", "id": req.get("id"), "result": {"payload": big}}
-            sys.stdout.write(json.dumps(resp) + "\\n")
-            sys.stdout.flush()
-    """)
-    )
-    async with AgentConnection("local", [sys.executable, str(fake_agent)]) as conn:
+    # 1 MiB — well above asyncio's 64 KiB default, comfortably below
+    # transport's MAX_LINE_BYTES.
+    script = _sized_response_agent(tmp_path, payload_bytes=1024 * 1024)
+    async with AgentConnection("local", [sys.executable, str(script)]) as conn:
         result = await conn.call("agent_info")
-    assert len(result["payload"]) == 256 * 1024
+    assert len(result["payload"]) == 1024 * 1024
+
+
+async def test_response_larger_than_transport_limit_fails_cleanly(tmp_path: Path) -> None:
+    """A response exceeding ``MAX_LINE_BYTES`` must raise ``TransportError``,
+    not a raw asyncio ``ValueError``. Regresses the over-budget failure mode
+    surfaced in GH #8.
+    """
+    script = _sized_response_agent(tmp_path, payload_bytes=MAX_LINE_BYTES + 1024)
+    async with AgentConnection(
+        "too-large", [sys.executable, str(script)], max_reconnects=0
+    ) as conn:
+        with pytest.raises(TransportError, match="line larger than"):
+            await conn.call("agent_info")
+
+
+async def test_protocol_corruption_tears_down_so_next_call_respawns(tmp_path: Path) -> None:
+    """After a protocol-level corruption (oversize, garbage, id mismatch),
+    the connection must drop the subprocess so the next call respawns clean.
+
+    Without this, subsequent calls inherit a desynced pipe and surface as
+    ``id mismatch`` errors on unrelated requests. This pins the recovery
+    behaviour added to `_recv` / `_call_once` in PR #11.
+
+    The fabricated agent uses a marker file to behave differently across
+    invocations: the *first* subprocess sends garbage; subsequent
+    subprocesses (proving the respawn happened) respond cleanly.
+    """
+    marker = tmp_path / "already_ran.flag"
+    script = tmp_path / "garbage_then_ok.py"
+    script.write_text(
+        textwrap.dedent(f"""\
+            import json, os, sys
+            line = sys.stdin.readline()
+            req = json.loads(line)
+            marker = {str(marker)!r}
+            if not os.path.exists(marker):
+                open(marker, "w").close()
+                sys.stdout.write("not json at all\\n")
+            else:
+                sys.stdout.write(json.dumps({{
+                    "jsonrpc": "2.0", "id": req["id"],
+                    "result": {{"recovered": True}},
+                }}) + "\\n")
+            sys.stdout.flush()
+        """),
+    )
+    async with AgentConnection(
+        "respawns",
+        [sys.executable, str(script)],
+        max_reconnects=0,
+    ) as conn:
+        with pytest.raises(TransportError, match="non-JSON"):
+            await conn.call("agent_info")
+        # White-box check: the corruption handler must have dropped the
+        # subprocess so the next call respawns.
+        assert conn._proc is None
+        # And the next call must succeed, against the fresh subprocess.
+        result = await conn.call("agent_info")
+    assert result == {"recovered": True}
 
 
 async def test_multiple_sequential_calls_share_one_subprocess() -> None:
