@@ -2,7 +2,7 @@
 
 Releases are cut by **pushing a `vX.Y.Z` tag** to GitHub. The CI
 workflow at
-[`.github/workflows/release.yml`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/.github/workflows/release.yml)
+[`.github/workflows/release.yml`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/.github/workflows/release.yml)
 builds the wheel + sdist, verifies the agent is force-included,
 publishes to PyPI via OIDC trusted publishing, and creates a GitHub
 Release with the CHANGELOG entry as the body.

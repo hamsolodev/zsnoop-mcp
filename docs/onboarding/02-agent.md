@@ -2,7 +2,7 @@
 
 ## What
 
-[`agent/zfs_snoop_agent.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/agent/zfs_snoop_agent.py) — a single
+[`agent/zfs_snoop_agent.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py) — a single
 Python file, stdlib only, that reads JSON-RPC requests from stdin and
 writes responses to stdout. It runs on whichever host you want to query.
 
@@ -27,7 +27,7 @@ and Python decodes and `exec()`s it. Zero install.
 ### Method allowlist (G1 — read-only by construction)
 
 The whole reason we trust this thing is the `METHODS` dict in
-[agent/zfs_snoop_agent.py]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/agent/zfs_snoop_agent.py):
+[agent/zfs_snoop_agent.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py):
 
 ```python
 METHODS: Final[dict[str, Any]] = {
@@ -50,7 +50,7 @@ METHODS: Final[dict[str, Any]] = {
 Every one of those is read-only. There is **no configuration knob** that
 adds a method to this dict. To add `destroy_pool`, you'd have to edit the
 source and re-deploy — and a test in
-[tests/test_dispatch.py]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_dispatch.py) asserts that no
+[tests/test_dispatch.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_dispatch.py) asserts that no
 common mutation name ever appears in the table.
 
 ### JSON-RPC over NDJSON

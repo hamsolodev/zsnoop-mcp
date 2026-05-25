@@ -30,9 +30,9 @@ Out of scope:
 ### G1 — No mutation operations are ever exposed
 
 Enforced by an explicit `METHODS` dict in
-[`agent/zfs_snoop_agent.py`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/agent/zfs_snoop_agent.py); only
+[`agent/zfs_snoop_agent.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py); only
 read-only methods present. Tested by
-[`test_methods_table_contains_no_mutating_operations`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_dispatch.py)
+[`test_methods_table_contains_no_mutating_operations`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_dispatch.py)
 which asserts that no name matching common destructive zfs verbs (destroy,
 snapshot, rollback, send, mount, …) ever leaks in.
 
@@ -47,13 +47,13 @@ become argv elements are validated *before* the call:
 
 The transport uses `shlex.quote` per token when building the remote shell
 command for SSH. Tests:
-[`test_validate_dataset_rejects_invalid`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_validation.py),
-[`test_validate_snapshot_rejects_invalid`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_validation.py).
+[`test_validate_dataset_rejects_invalid`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_validation.py),
+[`test_validate_snapshot_rejects_invalid`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_validation.py).
 
 ### G3 — Path inputs cannot escape their snapshot root
 
 Two layers of defence in
-[`agent.resolve_under_snapshot`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/agent/zfs_snoop_agent.py):
+[`agent.resolve_under_snapshot`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py):
 
 1. Reject `..` and absolute paths up front.
 2. After joining, `Path.resolve()` follows symlinks; the result must stay
@@ -62,9 +62,9 @@ Two layers of defence in
 The function returns the *unresolved* path so callers (`read_file`,
 `list_dir`) can `lstat()` the final component and refuse to follow a
 symlink at all. Tests:
-[`test_resolve_rejects_dotdot_traversal`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_path_safety.py),
-[`test_resolve_rejects_symlink_that_escapes`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_path_safety.py),
-[`test_read_file_refuses_to_follow_symlink`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_path_safety.py).
+[`test_resolve_rejects_dotdot_traversal`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_path_safety.py),
+[`test_resolve_rejects_symlink_that_escapes`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_path_safety.py),
+[`test_read_file_refuses_to_follow_symlink`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_path_safety.py).
 
 ### G4 — All reads are bounded
 
@@ -85,9 +85,9 @@ symlink at all. Tests:
 
 Truncation sets `truncated: true` in the response rather than failing.
 Tests:
-[`test_list_dir_truncates_at_max_entries`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_methods.py),
-[`test_find_files_truncates`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_methods.py),
-[`test_size_breakdown_truncates_on_budget`]({{ config.repo_url }}{{ source_url_prefix }}/{{ repo_branch }}/tests/test_methods.py).
+[`test_list_dir_truncates_at_max_entries`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_methods.py),
+[`test_find_files_truncates`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_methods.py),
+[`test_size_breakdown_truncates_on_budget`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_methods.py).
 
 ### G5 — Defence in depth via ZFS delegation (user mode)
 
