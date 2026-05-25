@@ -23,7 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `find_deleted` (and similar) returned anything near their default
   result caps. The transport's `create_subprocess_exec` now sets
   `limit=MAX_LINE_BYTES = 16 MiB`, big enough to clear every agent-side
-  hard cap.
+  hard cap. An over-budget response now raises a clear
+  `TransportError("...emitted a line larger than ... bytes")` instead
+  of a raw asyncio `ValueError`.
+- **Transport protocol-corruption errors left the pipe desynced.** Any
+  `TransportError` from `_recv` / `_call_once` (oversize line, garbage
+  JSON, id mismatch, malformed JSON-RPC frame) previously propagated
+  out without closing the subprocess. The agent's leftover bytes
+  remained in the pipe and the next call would surface as
+  `id mismatch on <host>: sent N, got M`. These error paths now
+  `_close_proc()` before raising so `_ensure_alive` respawns a fresh
+  subprocess on the next call. Regression test pins the recovery
+  behaviour.
+- **`_drain_stderr` race on close.** Pre-existing latent bug: the
+  stderr drainer read `self._proc.stderr` on every loop iteration, so
+  if `_close_proc` set `self._proc = None` before cancelling the
+  drainer task, the next iteration NPE'd. Newly exposed by the
+  protocol-error close path above. Fix: capture `proc.stderr` locally
+  at drainer entry.
 - **CI Python matrix was theatre.** The matrix labelled jobs `py3.11`,
   `py3.12`, `py3.13` but every job actually ran tests on **3.11**, because
   `uv sync` defaults to the lowest `requires-python`-compatible

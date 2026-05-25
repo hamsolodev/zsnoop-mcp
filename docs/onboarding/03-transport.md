@@ -17,6 +17,7 @@ combination we landed on:
 | Serial RPCs per connection (`asyncio.Lock`) | Avoids interleaved responses on stdin/stdout. Different hosts can still run concurrently because each has its own subprocess. |
 | Transparent reconnect on `EOFError` / `BrokenPipe` | SSH connections do die. We retry once silently; the second failure raises. |
 | Bounded `recv_timeout` (60 s) | A hung `zfs find /` shouldn't block the MCP server forever. |
+| Bounded NDJSON line size (`MAX_LINE_BYTES = 16 MiB`) | Comfortably clears every agent-side hard cap; an over-budget response surfaces as a `TransportError`, not a raw asyncio `ValueError`. |
 | Drain stderr to a logger AND a tail buffer | Used to be just the logger; we now also keep the last 50 lines in memory so failure messages include the actual underlying error. |
 
 ## How — guided tour
