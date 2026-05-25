@@ -40,6 +40,35 @@ async def test_agent_info_round_trip() -> None:
     assert result["limits"]["max_read_bytes"] > 0
 
 
+async def test_large_response_exceeds_asyncio_default_line_buffer(tmp_path: Path) -> None:
+    """A single JSON-RPC response larger than asyncio's default 64 KiB line
+    buffer must round-trip. Regresses GH #8.
+
+    Uses a fabricated agent that synthesises a large payload, so the test
+    doesn't depend on the real ZFS dataset shape.
+    """
+    fake_agent = tmp_path / "fat_agent.py"
+    fake_agent.write_text(
+        textwrap.dedent("""
+        import json, sys
+        # 256 KiB of payload — well above asyncio's 64 KiB default, well
+        # below transport's MAX_LINE_BYTES.
+        big = "x" * (256 * 1024)
+        for line in sys.stdin:
+            try:
+                req = json.loads(line)
+            except Exception:
+                continue
+            resp = {"jsonrpc": "2.0", "id": req.get("id"), "result": {"payload": big}}
+            sys.stdout.write(json.dumps(resp) + "\\n")
+            sys.stdout.flush()
+    """)
+    )
+    async with AgentConnection("local", [sys.executable, str(fake_agent)]) as conn:
+        result = await conn.call("agent_info")
+    assert len(result["payload"]) == 256 * 1024
+
+
 async def test_multiple_sequential_calls_share_one_subprocess() -> None:
     async with AgentConnection("local", _agent_argv()) as conn:
         first = await conn.call("agent_info")
