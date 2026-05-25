@@ -22,6 +22,12 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
+    # UV_PYTHON forces uv to use this exact Python version for `uv sync`
+    # and `uv run` instead of defaulting to the lowest `requires-python`
+    # compatible interpreter (which used to mean every matrix job ran on
+    # 3.11 regardless of label — see commit history).
+    env:
+      UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@v6
 
@@ -36,6 +42,11 @@ jobs:
 
       - name: Sync dev dependencies
         run: uv sync --group dev
+
+      - name: Confirm Python version used by uv
+        # Belt-and-braces: print the active Python so future matrix-misfires
+        # are visible in the log instead of silent like the first time.
+        run: uv run python --version
 
       - name: ruff check
         run: uv run ruff check
