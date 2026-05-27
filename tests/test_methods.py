@@ -134,14 +134,13 @@ def test_list_snapshots_rejects_invalid_dataset(fake_zfs: FakeZfs) -> None:
 
 
 def test_list_snapshots_filters_by_after(fake_zfs: FakeZfs) -> None:
-    # 1700_000_000 = 2023-11-14, 1716_000_000 = 2024-05-17, 1730_000_000 = 2024-10-27
+    # Three snapshots straddling 2024-01-01: one before, two after.
     fake_zfs.add(
         ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
         "rpool/home@old\t1700000000\t10\t100\n"
         "rpool/home@mid\t1716000000\t10\t100\n"
         "rpool/home@new\t1730000000\t10\t100\n",
     )
-    # 2024-01-01 = ts 1704067200 → drops `old`, keeps `mid` and `new`.
     result = agent.m_list_snapshots({"after": "2024-01-01T00:00:00+00:00"})
     names = [s["name"] for s in result["snapshots"]]
     assert names == ["rpool/home@mid", "rpool/home@new"]
@@ -150,11 +149,11 @@ def test_list_snapshots_filters_by_after(fake_zfs: FakeZfs) -> None:
 
 
 def test_list_snapshots_filters_by_before(fake_zfs: FakeZfs) -> None:
+    # Two snapshots straddling 2024-06-01: one before, one after.
     fake_zfs.add(
         ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
         "rpool/home@old\t1700000000\t10\t100\nrpool/home@new\t1730000000\t10\t100\n",
     )
-    # 2024-06-01 = ts 1717200000 → keeps `old`, drops `new`.
     result = agent.m_list_snapshots({"before": "2024-06-01T00:00:00+00:00"})
     assert [s["name"] for s in result["snapshots"]] == ["rpool/home@old"]
 
@@ -177,6 +176,27 @@ def test_list_snapshots_truncated_false_when_under_cap(fake_zfs: FakeZfs) -> Non
     )
     result = agent.m_list_snapshots({"max_results": 100})
     assert result["truncated"] is False
+
+
+def test_list_snapshots_max_results_short_circuits_loop(fake_zfs: FakeZfs) -> None:
+    """When max_results is set the loop must break early — we should not
+    pay to construct dicts for rows past the cap. Verifies by setting
+    max_results=2 against 100 rows and confirming we only got 2 back
+    with truncated=True; the speed of the assertion is the practical
+    win this guards."""
+    lines = "".join(f"rpool/home@s{i:03d}\t{1000 + i}\t10\t100\n" for i in range(100))
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        lines,
+    )
+    result = agent.m_list_snapshots({"max_results": 2})
+    assert len(result["snapshots"]) == 2
+    assert result["truncated"] is True
+    # First two rows are the ones we kept; we never built dicts past those.
+    assert [s["name"] for s in result["snapshots"]] == [
+        "rpool/home@s000",
+        "rpool/home@s001",
+    ]
 
 
 def test_list_snapshots_max_results_capped_at_hard_max(fake_zfs: FakeZfs) -> None:

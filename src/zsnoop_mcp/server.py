@@ -268,9 +268,9 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             after_iso = maybe_to_iso(after)
             before_iso = maybe_to_iso(before)
         except TimePhraseError as e:
-            raise ValueError(f"could not parse time phrase: {e}") from e
+            raise ValueError(str(e)) from e
         params: dict[str, Any] = {}
-        if dataset is not None:
+        if dataset:
             params["dataset"] = dataset
         if after_iso is not None:
             params["after"] = after_iso
@@ -512,7 +512,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             after_iso = maybe_to_iso(after)
             before_iso = maybe_to_iso(before)
         except TimePhraseError as e:
-            raise ValueError(f"could not parse time phrase: {e}") from e
+            raise ValueError(str(e)) from e
         return await _call(
             host,
             "snapshots_containing",
@@ -556,7 +556,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             after_iso = maybe_to_iso(after)
             before_iso = maybe_to_iso(before)
         except TimePhraseError as e:
-            raise ValueError(f"could not parse time phrase: {e}") from e
+            raise ValueError(str(e)) from e
         params: dict[str, Any] = {
             "dataset": dataset,
             "after": after_iso,
@@ -619,7 +619,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         try:
             older_than_iso = maybe_to_iso(older_than)
         except TimePhraseError as e:
-            raise ValueError(f"could not parse time phrase: {e}") from e
+            raise ValueError(str(e)) from e
         if older_than_iso is None:
             raise ValueError("older_than must be a non-empty time phrase or ISO 8601 string")
         params: dict[str, Any] = {"older_than": older_than_iso}

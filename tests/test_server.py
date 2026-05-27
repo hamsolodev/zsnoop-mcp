@@ -181,6 +181,19 @@ async def test_list_snapshots_rejects_bad_time_phrase(cfg: Config, fake_pool: Fa
         await _tool_call(server, "list_snapshots", host="r2d2", after="never")
 
 
+async def test_list_snapshots_treats_empty_dataset_as_unscoped(
+    cfg: Config,
+    fake_pool: FakePool,
+) -> None:
+    """Empty-string ``dataset`` is treated as "no filter" — matches the legacy
+    ``{dataset: dataset} if dataset else None`` convention used by sibling
+    tools like ``snapshot_cadence``. Without this, an empty string would be
+    forwarded and rejected by the agent's dataset validation."""
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    await _tool_call(server, "list_snapshots", host="r2d2", dataset="")
+    assert fake_pool.calls == [("r2d2", "list_snapshots", None)]
+
+
 async def test_read_file_omits_max_bytes_when_none(cfg: Config, fake_pool: FakePool) -> None:
     server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
     await _tool_call(server, "read_file", host="r2d2", snapshot="rpool@a", path="foo")
