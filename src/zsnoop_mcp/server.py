@@ -9,15 +9,129 @@ forwarding ISO 8601 timestamps to the agent.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from zsnoop_mcp.config import Config, ConfigError
+from zsnoop_mcp.config import Config, ConfigError, HostConfig
 from zsnoop_mcp.timeparse import TimePhraseError, maybe_to_iso
 from zsnoop_mcp.transport import AgentRpcError, ConnectionPool, TransportError
+
+# SSH options forwarded to scp/cp for fetch operations. Mirrors the subset of
+# transport.DEFAULT_SSH_OPTIONS that are meaningful to scp (omits -T, which
+# controls TTY allocation for interactive SSH, not file transfer).
+_SCP_SSH_OPTIONS: tuple[str, ...] = (
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+)
+
+# Timeout for a single scp / cp fetch subprocess (seconds). Large files on
+# slow links may take longer; callers should document this limit.
+_FETCH_TIMEOUT_SECONDS: float = 300.0
+
+
+def _parse_snapshot_name(name: str) -> tuple[str, str]:
+    """Split ``dataset@snapname`` into ``(dataset, snapname)``.
+
+    Raises ``ValueError`` for names that don't contain ``@``. Does not
+    validate the character set — that happens on the agent side.
+    """
+    if "@" not in name:
+        raise ValueError(f"invalid snapshot name (missing '@'): {name!r}")
+    dataset, snapname = name.split("@", 1)
+    return dataset, snapname
+
+
+def _validate_fetch_path(path: str) -> str:
+    """Reject path segments that would escape the snapshot root.
+
+    Mirrors the agent's ``validate_user_path`` for the server side: strips
+    a leading ``/`` (callers may pass either form) and rejects ``..``
+    components. Returns the normalised relative path string.
+    """
+    stripped = path.lstrip("/")
+    parts = Path(stripped).parts
+    if ".." in parts:
+        raise ValueError(f"parent-directory segments are not allowed: {path!r}")
+    return stripped
+
+
+def _validate_local_dest(local_path: str) -> Path:
+    """Resolve and validate the caller-supplied local destination path.
+
+    Ensures the path is absolute (after ``~`` expansion) and its parent is a
+    real directory. Existence semantics for the destination itself are left to
+    the caller — ``fetch_file`` and ``fetch_dir`` have different requirements.
+    """
+    expanded = Path(local_path).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(
+            f"local_path must be absolute (or ~-expanded): {local_path!r}",
+        )
+    dest = expanded.resolve()
+    parent = dest.parent
+    if not parent.exists():
+        raise ValueError(f"destination directory does not exist: {parent}")
+    if not parent.is_dir():
+        # parent exists on disk but isn't a directory (regular file, FIFO,
+        # symlink to a non-dir, etc.) — can't create dest underneath it.
+        raise ValueError(f"cannot write under {parent}: it is not a directory")
+    return dest
+
+
+async def _run_fetch(cmd: list[str]) -> None:
+    """Run *cmd* as a subprocess, raising ``RuntimeError`` on failure or timeout.
+
+    On timeout the child is SIGKILLed and reaped before we raise, so we never
+    leak a background ``scp``/``cp`` that keeps using the network and disk.
+    Stdin is wired to /dev/null so a misconfigured ``scp`` cannot block waiting
+    for interactive input despite ``BatchMode=yes``.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_FETCH_TIMEOUT_SECONDS)
+    except TimeoutError as e:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"fetch timed out after {_FETCH_TIMEOUT_SECONDS:.0f}s") from e
+    if proc.returncode != 0:
+        msg = stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"fetch failed (exit {proc.returncode}): {msg}")
+
+
+def _build_fetch_cmd(
+    host_config: HostConfig,
+    remote_path: str,
+    dest: Path,
+    *,
+    recursive: bool,
+) -> list[str]:
+    """Construct the scp (or cp for local transport) argv for a fetch."""
+    if host_config.transport == "local":
+        cmd: list[str] = ["cp", "-a"]
+        if recursive:
+            cmd.append("-r")
+        cmd.extend([remote_path, str(dest)])
+    else:
+        cmd = ["scp", *_SCP_SSH_OPTIONS, *host_config.ssh_options]
+        if recursive:
+            cmd.append("-r")
+        cmd.extend([f"{host_config.ssh_target}:{remote_path}", str(dest)])
+    return cmd
+
 
 INSTRUCTIONS = (
     "Read-only exploration of ZFS snapshots on remote hosts over SSH. "
@@ -41,7 +155,8 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
     async def _call(host: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         _validate_host(host)
         try:
-            return await pool.call(host, method, params)
+            result = await pool.call(host, method, params)
+            return {**result, "queried_at": datetime.now(UTC).isoformat()}
         except AgentRpcError as e:
             raise ValueError(f"agent error ({e.code}): {e.message}") from e
         except TransportError as e:
@@ -488,6 +603,138 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         Both snapshots must belong to the same dataset.
         """
         return await _call(host, "size_delta", {"snap_a": snap_a, "snap_b": snap_b})
+
+    @mcp.tool()
+    async def checksum_file(host: str, snapshot: str, path: str) -> dict[str, Any]:
+        """SHA-256 of the full content of `path` in `snapshot` on `host`.
+
+        Unlike ``read_file``, the entire file is hashed with no byte cap —
+        making it suitable for verifying large files. Use this after
+        ``fetch_file`` to confirm the recovered copy is bit-for-bit identical
+        to the snapshot original, or to compare against a local ``sha256sum``
+        result before downloading.
+
+        Hard cap: 256 MiB per file. Symlinks are refused. Returns
+        ``{snapshot, path, size, sha256, queried_at}``.
+        """
+        return await _call(host, "checksum_file", {"snapshot": snapshot, "path": path})
+
+    @mcp.tool()
+    async def fetch_file(
+        host: str,
+        snapshot: str,
+        path: str,
+        local_path: str,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Copy a single file from a ZFS snapshot to `local_path` on this machine.
+
+        Uses SCP (or a local ``cp`` for the local transport) — handles any
+        file size and any encoding, unlike ``read_file`` which is capped at
+        4 MiB and returns content through the LLM context. Use this for
+        actual file recovery; use ``read_file`` for quick inspection of small
+        text files.
+
+        ``path`` is relative to the snapshot root (leading ``/`` is stripped).
+        ``local_path`` is an absolute or ``~``-expanded path on this machine;
+        its parent directory must already exist. Directory destinations are
+        rejected even with ``overwrite=true`` — pass an explicit file path so
+        the returned ``local_path`` and ``size_bytes`` are unambiguous. Set
+        ``overwrite=true`` to replace an existing file; the default is to refuse.
+
+        Returns ``{snapshot, path, local_path, size_bytes, queried_at}``.
+        """
+        _validate_host(host)
+        host_config = config.host(host)
+        try:
+            fetch_path = _validate_fetch_path(path)
+            dest = _validate_local_dest(local_path)
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+        if dest.exists():
+            if dest.is_dir():
+                raise ValueError(
+                    f"destination is a directory; fetch_file needs an explicit file path: {dest}",
+                )
+            if not overwrite:
+                raise ValueError(
+                    f"destination already exists: {dest} — pass overwrite=true to replace it",
+                )
+        dataset, snapname = _parse_snapshot_name(snapshot)
+        props = await _call(
+            host, "dataset_properties", {"dataset": dataset, "properties": ["mountpoint"]}
+        )
+        mountpoint = next(
+            (p["value"] for p in props.get("properties", []) if p["name"] == "mountpoint"),
+            None,
+        )
+        if not mountpoint or mountpoint in ("-", "none", "legacy"):
+            raise ValueError(f"dataset {dataset!r} has no usable mountpoint ({mountpoint!r})")
+        remote_path = f"{mountpoint}/.zfs/snapshot/{snapname}/{fetch_path}"
+        cmd = _build_fetch_cmd(host_config, remote_path, dest, recursive=False)
+        await _run_fetch(cmd)
+        size = dest.stat().st_size
+        return {
+            "snapshot": snapshot,
+            "path": path,
+            "local_path": str(dest),
+            "size_bytes": size,
+            "queried_at": datetime.now(UTC).isoformat(),
+        }
+
+    @mcp.tool()
+    async def fetch_dir(
+        host: str,
+        snapshot: str,
+        path: str,
+        local_path: str,
+    ) -> dict[str, Any]:
+        """Copy a directory subtree from a ZFS snapshot to `local_path` on this machine.
+
+        Recursively copies the entire subtree under `path` using SCP (or
+        ``cp -ar`` for the local transport). Use this to restore a whole
+        directory from a snapshot in one call.
+
+        ``path`` is relative to the snapshot root (leading ``/`` is stripped).
+        ``local_path`` is an absolute or ``~``-expanded path on this machine;
+        its parent directory must already exist, and ``local_path`` itself
+        must NOT already exist — ``scp -r`` / ``cp -ar`` semantics for
+        existing destinations are ambiguous (some copy *into*, some
+        *populate*), so the caller is required to clear it first.
+
+        Returns ``{snapshot, path, local_path, queried_at}``.
+        """
+        _validate_host(host)
+        host_config = config.host(host)
+        try:
+            fetch_path = _validate_fetch_path(path)
+            dest = _validate_local_dest(local_path)
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+        if dest.exists():
+            raise ValueError(
+                f"destination already exists: {dest} — remove it first; "
+                f"fetch_dir requires a non-existent destination",
+            )
+        dataset, snapname = _parse_snapshot_name(snapshot)
+        props = await _call(
+            host, "dataset_properties", {"dataset": dataset, "properties": ["mountpoint"]}
+        )
+        mountpoint = next(
+            (p["value"] for p in props.get("properties", []) if p["name"] == "mountpoint"),
+            None,
+        )
+        if not mountpoint or mountpoint in ("-", "none", "legacy"):
+            raise ValueError(f"dataset {dataset!r} has no usable mountpoint ({mountpoint!r})")
+        remote_path = f"{mountpoint}/.zfs/snapshot/{snapname}/{fetch_path}"
+        cmd = _build_fetch_cmd(host_config, remote_path, dest, recursive=True)
+        await _run_fetch(cmd)
+        return {
+            "snapshot": snapshot,
+            "path": path,
+            "local_path": str(dest),
+            "queried_at": datetime.now(UTC).isoformat(),
+        }
 
     return mcp
 

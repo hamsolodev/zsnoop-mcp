@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-27
+
+### Added
+
+- **`queried_at` timestamp on every agent response.** Server's `_call()`
+  injects a UTC ISO 8601 timestamp into every result before returning it,
+  so the LLM can reason about data freshness instead of treating an
+  in-context result as still-current on a later turn.
+- **`checksum_file` tool** (agent-side). Streams a full-file SHA-256 in
+  64 KiB chunks; no `max_bytes` parameter (unlike `read_file`'s 4 MiB
+  cap) — verifies arbitrarily large recovered files without shipping
+  bytes through the MCP layer. Refuses symlinks (G3) and non-regular
+  files. Hard cap **256 MiB** per file (`MAX_CHECKSUM_FILESIZE`), exposed
+  via `agent_info.limits.max_checksum_filesize`; for larger files, run
+  `sha256sum` directly on the host.
+- **`fetch_file` tool** (server-side). Copies one file from a snapshot to
+  a local path via SCP — or `cp -a` for `transport = "local"` hosts. Gets
+  the dataset's mountpoint via `dataset_properties`, then SCPs from
+  `<mountpoint>/.zfs/snapshot/<snap>/<path>`. Refuses to overwrite an
+  existing file unless `overwrite=true`; refuses directory destinations
+  outright (would otherwise copy *into* the directory and break the
+  returned `local_path` / `size_bytes`). Stdin wired to `/dev/null` so a
+  misconfigured `scp` cannot hang on prompts despite `BatchMode=yes`.
+  300 s timeout; on timeout the subprocess is `kill()`ed and reaped
+  rather than leaked.
+- **`fetch_dir` tool** (server-side). Recursive variant of `fetch_file`
+  (`scp -r` / `cp -ar`). Requires `local_path` to not exist — `scp -r`
+  and `cp -ar` have ambiguous semantics for existing destinations
+  (copy-*into* vs populate), and rather than guess we make the caller
+  clear it first.
+- **`docs/USAGE.md`** extended with example prompts for the three new
+  tools — file recovery to disk and post-recovery integrity verification.
+
+### Changed
+
+- **Agent version** bumped to **0.2.0**.
+- **`local_path` validation tightened** for `fetch_file` / `fetch_dir`:
+  rejects non-absolute paths (was silently resolving against the server's
+  CWD), and requires the parent path component to actually be a directory
+  on disk (clearer error than the post-SCP failure when the parent exists
+  as a regular file).
+
 ## [0.1.2] — 2026-05-26
 
 ### Fixed
@@ -148,7 +190,8 @@ Initial public release.
 - PII scrubbed from example values throughout the repo and from git
   history.
 
-[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.2.0
 [0.1.2]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.1.2
 [0.1.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.1.0

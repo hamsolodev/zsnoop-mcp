@@ -107,15 +107,18 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `find_files`           | `fnmatch` name search inside a snapshot                  |
 | `content_grep`         | Regex content search inside a snapshot                   |
 | `file_history`         | Every snapshot's version of a given file in a dataset    |
-| `versions_of`          | `file_history` deduped by content hash (distinct versions only) |
+| `versions_of`          | `file_history` deduped by hash (distinct versions only)  |
 | `file_diff`            | Unified diff of one file across two snapshots            |
 | `snapshots_containing` | Snapshots in which a path currently exists (time-ranged) |
 | `first_appearance`     | Earliest snapshot containing a path                      |
-| `last_appearance`      | Latest snapshot containing a path (answers "when did X disappear?") |
+| `last_appearance`      | Latest snapshot containing a path; reveals when deleted  |
 | `find_deleted`         | Paths deleted between two snapshots in a time window     |
-| `bisect_change`        | Binary-search snapshots for the one where a predicate flips |
-| `stale_snapshots`      | Snapshots older than a time phrase, sorted by unique bytes |
+| `bisect_change`        | Binary-search for the snapshot where a predicate flips   |
+| `stale_snapshots`      | Snapshots older than a time phrase, sorted by uniqueness |
 | `size_delta`           | Bytes written between two snapshots of one dataset       |
+| `checksum_file`        | Full-file SHA-256 (256 MiB cap) for integrity checks     |
+| `fetch_file`           | Copy a snapshot file to a local path via SCP             |
+| `fetch_dir`            | Copy a snapshot directory tree to a local path via SCP   |
 
 Time-range parameters accept ISO 8601 *or* human phrases — `yesterday`,
 `last week`, `3 days ago`, `2 hours ago`, etc. Parsing happens locally; the

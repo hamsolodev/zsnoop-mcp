@@ -165,5 +165,6 @@ def test_methods_table_is_what_we_expect() -> None:
         "bisect_change",
         "stale_snapshots",
         "size_delta",
+        "checksum_file",
     }
     assert set(agent.METHODS) == expected
