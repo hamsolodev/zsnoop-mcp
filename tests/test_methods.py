@@ -133,6 +133,62 @@ def test_list_snapshots_rejects_invalid_dataset(fake_zfs: FakeZfs) -> None:
         agent.m_list_snapshots({"dataset": "rpool;rm"})
 
 
+def test_list_snapshots_filters_by_after(fake_zfs: FakeZfs) -> None:
+    # 1700_000_000 = 2023-11-14, 1716_000_000 = 2024-05-17, 1730_000_000 = 2024-10-27
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        "rpool/home@old\t1700000000\t10\t100\n"
+        "rpool/home@mid\t1716000000\t10\t100\n"
+        "rpool/home@new\t1730000000\t10\t100\n",
+    )
+    # 2024-01-01 = ts 1704067200 → drops `old`, keeps `mid` and `new`.
+    result = agent.m_list_snapshots({"after": "2024-01-01T00:00:00+00:00"})
+    names = [s["name"] for s in result["snapshots"]]
+    assert names == ["rpool/home@mid", "rpool/home@new"]
+    # No `truncated` field when max_results not passed.
+    assert "truncated" not in result
+
+
+def test_list_snapshots_filters_by_before(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        "rpool/home@old\t1700000000\t10\t100\nrpool/home@new\t1730000000\t10\t100\n",
+    )
+    # 2024-06-01 = ts 1717200000 → keeps `old`, drops `new`.
+    result = agent.m_list_snapshots({"before": "2024-06-01T00:00:00+00:00"})
+    assert [s["name"] for s in result["snapshots"]] == ["rpool/home@old"]
+
+
+def test_list_snapshots_truncates_when_max_results_set(fake_zfs: FakeZfs) -> None:
+    lines = "".join(f"rpool/home@s{i}\t{1000 + i}\t10\t100\n" for i in range(5))
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        lines,
+    )
+    result = agent.m_list_snapshots({"max_results": 3})
+    assert len(result["snapshots"]) == 3
+    assert result["truncated"] is True
+
+
+def test_list_snapshots_truncated_false_when_under_cap(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        "rpool/home@a\t1000\t10\t100\n",
+    )
+    result = agent.m_list_snapshots({"max_results": 100})
+    assert result["truncated"] is False
+
+
+def test_list_snapshots_max_results_capped_at_hard_max(fake_zfs: FakeZfs) -> None:
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        "rpool/home@a\t1000\t10\t100\n",
+    )
+    # validate_positive_int clamps to MAX_LIST_SNAPSHOTS — no error, just a cap.
+    result = agent.m_list_snapshots({"max_results": 10_000_000})
+    assert result["truncated"] is False  # only 1 row, cap doesn't matter
+
+
 # ---- dataset_properties ----------------------------------------------------
 
 

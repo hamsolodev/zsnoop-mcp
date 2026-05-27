@@ -82,6 +82,12 @@ DEFAULT_TOP_CONSUMERS: Final = 20
 # `stale_snapshots` returns at most this many entries per call.
 MAX_STALE_RESULTS: Final = 10_000
 DEFAULT_STALE_RESULTS: Final = 1_000
+# `list_snapshots` opt-in cap. Default is *no* cap (preserves the long-standing
+# "list everything" behaviour relied on by `m_snapshot_cadence`); when the
+# caller passes ``max_results`` it's clamped to this. The cap exists so the
+# LLM-facing tool can offer a safety net against blowing the MCP token budget
+# on hosts with thousands of snapshots.
+MAX_LIST_SNAPSHOTS: Final = 10_000
 # `bisect_change` evaluates predicates that may read file content; this
 # bounds the per-evaluation read.
 MAX_BISECT_BYTES: Final = 4 * 1024 * 1024
@@ -310,6 +316,7 @@ class Limits:
     max_stale_results: int = MAX_STALE_RESULTS
     max_bisect_bytes: int = MAX_BISECT_BYTES
     max_checksum_filesize: int = MAX_CHECKSUM_FILESIZE
+    max_list_snapshots: int = MAX_LIST_SNAPSHOTS
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
     zfs_diff_timeout_seconds: float = ZFS_DIFF_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
@@ -333,6 +340,7 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_stale_results": MAX_STALE_RESULTS,
             "max_bisect_bytes": MAX_BISECT_BYTES,
             "max_checksum_filesize": MAX_CHECKSUM_FILESIZE,
+            "max_list_snapshots": MAX_LIST_SNAPSHOTS,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
             "zfs_diff_timeout_seconds": ZFS_DIFF_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
@@ -566,8 +574,32 @@ def m_list_datasets(_params: dict[str, Any]) -> dict[str, Any]:
 
 
 def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
-    """List snapshots; optionally scoped to a single dataset (recursive)."""
+    """List snapshots; optionally scoped to a single dataset (recursive).
+
+    Optional filters:
+    - ``after`` / ``before``: ISO 8601 timestamps (server-side time-phrase
+      parsing produces these). Filters by snapshot ``creation`` time.
+    - ``max_results``: cap the returned list (hard max ``MAX_LIST_SNAPSHOTS``).
+      When set, the response includes ``truncated: bool``.
+
+    When ``max_results`` is omitted the response shape is unchanged (no
+    ``truncated`` field), preserving the contract relied on by internal
+    callers such as ``m_snapshot_cadence``.
+    """
     dataset = params.get("dataset")
+    after = params.get("after")
+    before = params.get("before")
+    after_ts = _iso_to_ts(after, name="after")
+    before_ts = _iso_to_ts(before, name="before")
+    max_results_raw = params.get("max_results")
+    max_results: int | None = None
+    if max_results_raw is not None:
+        max_results = validate_positive_int(
+            max_results_raw,
+            name="max_results",
+            default=MAX_LIST_SNAPSHOTS,
+            hard_max=MAX_LIST_SNAPSHOTS,
+        )
     args = ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"]
     if dataset is not None:
         validate_dataset(dataset)
@@ -578,18 +610,28 @@ def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
         if not line:
             continue
         name, creation, used, refer = line.split("\t")
+        creation_int = _int_or_none(creation)
+        if after_ts is not None and (creation_int is None or creation_int < after_ts):
+            continue
+        if before_ts is not None and (creation_int is None or creation_int > before_ts):
+            continue
         ds, snap = name.split("@", 1) if "@" in name else (name, "")
         snaps.append(
             {
                 "name": name,
                 "dataset": ds,
                 "snap": snap,
-                "creation": _int_or_none(creation),
+                "creation": creation_int,
                 "used": _int_or_none(used),
                 "refer": _int_or_none(refer),
             }
         )
-    return {"snapshots": snaps}
+    result: dict[str, Any] = {"snapshots": snaps}
+    if max_results is not None:
+        truncated = len(snaps) > max_results
+        result["snapshots"] = snaps[:max_results]
+        result["truncated"] = truncated
+    return result
 
 
 _AUTOSNAP_CLASS_RE: Final = re.compile(

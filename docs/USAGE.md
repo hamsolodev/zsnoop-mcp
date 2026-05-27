@@ -155,6 +155,15 @@ transition. Other predicate kinds: `exists`, `sha256_equals`, and
 is. If the most recent creation is older than expected, your snapshot job
 isn't running.
 
+> "What snapshots were created yesterday on `blaster`?"
+
+`list_snapshots(host="blaster", after="yesterday", before="today")` —
+filtering happens agent-side, so the response stays small even on hosts
+with thousands of snapshots. Without `after`/`before`, an unfiltered
+call can return a megabyte of JSON and trip the per-tool token cap.
+Pair with `dataset=` to narrow further, or with `max_results=` for an
+explicit cap (response includes `truncated=true` when exceeded).
+
 ## Discovery
 
 > "What pools and datasets exist on r2d2?"

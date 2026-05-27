@@ -43,3 +43,6 @@ local_hosts.toml
 
 # MkDocs build output
 site/
+
+# Claude Code session-local state (allowlists, etc.)
+.claude/
