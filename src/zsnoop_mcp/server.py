@@ -10,6 +10,8 @@ forwarding ISO 8601 timestamps to the agent.
 from __future__ import annotations
 
 import asyncio
+import re
+import shlex
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
@@ -38,14 +40,33 @@ _SCP_SSH_OPTIONS: tuple[str, ...] = (
 _FETCH_TIMEOUT_SECONDS: float = 300.0
 
 
+# Snapshot-name shape, used to validate strings before they reach the SCP
+# command builder for fetch_file / fetch_dir. Mirrors the agent's SNAPSHOT_RE
+# (kept duplicated rather than imported because the agent is a standalone
+# single-file script, not a package). Defence in depth: even though we
+# shell-quote the eventual remote path, refusing malformed names at the
+# server boundary fails fast with a clear error.
+_SNAPSHOT_NAME_RE: re.Pattern[str] = re.compile(
+    r"^[A-Za-z0-9_][A-Za-z0-9_.:/-]*@[A-Za-z0-9_][A-Za-z0-9_.:-]*$",
+)
+
+
 def _parse_snapshot_name(name: str) -> tuple[str, str]:
     """Split ``dataset@snapname`` into ``(dataset, snapname)``.
 
-    Raises ``ValueError`` for names that don't contain ``@``. Does not
-    validate the character set — that happens on the agent side.
+    Validates the full name against ZFS's restrictive snapshot-naming rules
+    before splitting, so a name containing shell metacharacters (semicolons,
+    backticks, ``$()``, spaces, etc.) is refused at the server boundary
+    rather than being silently passed into a downstream SCP source path.
     """
     if "@" not in name:
         raise ValueError(f"invalid snapshot name (missing '@'): {name!r}")
+    if not _SNAPSHOT_NAME_RE.match(name):
+        raise ValueError(
+            f"invalid snapshot name {name!r}: must match ZFS naming "
+            f"(letters, digits, '_.:/' for dataset; '@' separator; "
+            f"letters, digits, '_.:-' for snapshot)",
+        )
     dataset, snapname = name.split("@", 1)
     return dataset, snapname
 
@@ -119,7 +140,15 @@ def _build_fetch_cmd(
     *,
     recursive: bool,
 ) -> list[str]:
-    """Construct the scp (or cp for local transport) argv for a fetch."""
+    """Construct the scp (or cp for local transport) argv for a fetch.
+
+    For the SSH transport the source argument uses scp's ``host:path`` form,
+    and the *path* portion is passed to a remote shell by scp. Shell-quote
+    it so a snapshot filename containing spaces, ``;``, ``$()``, backticks,
+    or other shell metacharacters can't be interpreted as commands on the
+    remote host. The local-transport ``cp`` invocation needs no quoting
+    because the path is passed as a direct argv element.
+    """
     if host_config.transport == "local":
         cmd: list[str] = ["cp", "-a"]
         if recursive:
@@ -129,7 +158,7 @@ def _build_fetch_cmd(
         cmd = ["scp", *_SCP_SSH_OPTIONS, *host_config.ssh_options]
         if recursive:
             cmd.append("-r")
-        cmd.extend([f"{host_config.ssh_target}:{remote_path}", str(dest)])
+        cmd.extend([f"{host_config.ssh_target}:{shlex.quote(remote_path)}", str(dest)])
     return cmd
 
 

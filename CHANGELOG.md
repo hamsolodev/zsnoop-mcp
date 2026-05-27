@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Shell injection in `fetch_file` / `fetch_dir` SCP source path.** Both
+  tools built their SCP source as `f"{host}:{remote_path}"` and handed it
+  to `scp`, which passes the path component to a *remote* shell — so
+  shell metacharacters (`;`, `$()`, backticks, spaces) in either the
+  snapshot name or the requested filename could execute commands on the
+  remote host. Now `_parse_snapshot_name` rejects snapshot strings that
+  don't match ZFS's restrictive naming rules (defence in depth, fails
+  fast at the server boundary), and `_build_fetch_cmd` `shlex.quote()`s
+  the full remote path before interpolation so legitimate filenames
+  containing metacharacters can no longer reach the remote shell
+  unescaped. Restores conformance with SECURITY.md G2.
+
+### Fixed
+
+- **Transport recv-timeout caused chained failures.** The 60 s default
+  `recv_timeout` was shorter than the agent's `ZFS_DIFF_TIMEOUT_SECONDS`
+  (300 s), so a legitimate long-running `diff_snapshots` / `find_deleted`
+  could time out at the transport layer while the agent kept working.
+  Worse, the timeout path explicitly *didn't* tear down the subprocess
+  ("agent is still alive") — so the agent's late response would land in
+  the pipe and surface as an `id mismatch` on the next call (two errors
+  back-to-back from the LLM's perspective). Fix: bump the default
+  `recv_timeout` to 360 s (300 s + buffer), and on timeout close the
+  subprocess defensively so any late response can't desync the wire.
+
 ### Added
 
 - **`list_snapshots` time filtering and optional cap.** New optional

@@ -256,6 +256,38 @@ async def test_id_mismatch_raises_transport_error(tmp_path: Path) -> None:
 # ---- lifecycle --------------------------------------------------------------
 
 
+async def test_recv_timeout_tears_down_subprocess(tmp_path: Path) -> None:
+    """A recv timeout means the agent is in an unknown state from our
+    perspective — any late response would land in the pipe and surface as
+    an `id mismatch` on the next call. The transport must close the
+    subprocess on timeout so the next call respawns clean.
+
+    Uses a hanging agent that reads the request but never replies, paired
+    with a sub-second recv_timeout to keep the test fast.
+    """
+    script = tmp_path / "hangs.py"
+    script.write_text(
+        textwrap.dedent("""\
+            import sys, time
+            sys.stdin.readline()
+            # Never write a response. Sleep so the process is alive when
+            # the transport times out.
+            time.sleep(30)
+        """),
+    )
+    async with AgentConnection(
+        "hangs",
+        [sys.executable, str(script)],
+        max_reconnects=0,
+        recv_timeout=0.2,
+    ) as conn:
+        with pytest.raises(TransportError, match="did not respond"):
+            await conn.call("agent_info")
+        # White-box: the timeout handler must have torn down the
+        # subprocess so the next call would respawn against a fresh one.
+        assert conn._proc is None
+
+
 async def test_close_terminates_subprocess() -> None:
     conn = AgentConnection("local", _agent_argv())
     await conn.call("agent_info")

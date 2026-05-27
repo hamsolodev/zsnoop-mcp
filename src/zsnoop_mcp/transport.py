@@ -140,7 +140,12 @@ class AgentConnection:
         *,
         max_reconnects: int = 1,
         spawn_timeout: float = 10.0,
-        recv_timeout: float = 60.0,
+        # 60 s buffer above the agent's longest sanctioned operation
+        # (ZFS_DIFF_TIMEOUT_SECONDS = 300 s). If the agent finishes within
+        # its own budget, the transport waits long enough to see it; if the
+        # agent exceeds its own budget, it raises AgentTimeoutError back to
+        # us well before we time out here.
+        recv_timeout: float = 360.0,
     ) -> None:
         self.name = name
         self._argv = list(argv)
@@ -325,7 +330,12 @@ class AgentConnection:
         try:
             line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=self._recv_timeout)
         except TimeoutError as e:
-            # The agent is still alive and may finish later; don't tear down.
+            # Defensively tear down: if the agent finishes the in-flight
+            # operation later it will write a now-stale response to the
+            # pipe, which would surface as an `id mismatch` on the next
+            # call (chained failure for the LLM). Closing forces a clean
+            # respawn on the next call instead.
+            await self._close_proc()
             raise TransportError(
                 f"agent on {self.name!r} did not respond within {self._recv_timeout}s",
             ) from e
