@@ -342,6 +342,69 @@ def _make_fetch_pool(mountpoint: str) -> FakePool:
     return pool
 
 
+async def test_fetch_file_rejects_snapshot_name_with_shell_metas(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    """Server boundary refuses snapshot names that don't match ZFS naming —
+    defence-in-depth against shell injection via the SCP source path even
+    though the eventual path is also shell-quoted."""
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="invalid snapshot name"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1; touch /tmp/pwned",
+            path="etc/app.conf",
+            local_path=str(tmp_path / "out.conf"),
+        )
+
+
+async def test_fetch_file_shell_quotes_path_with_metacharacters(
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot file with shell-special characters in its path must be
+    shell-quoted before being passed to scp, so the remote shell can't
+    interpret them as commands. Snapshot names go through the regex
+    check, but filenames legitimately contain spaces / dollars / etc."""
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    captured: list[list[str]] = []
+
+    async def fake_run_fetch(cmd: list[str]) -> None:
+        captured.append(cmd)
+        await asyncio.to_thread(Path(cmd[-1]).write_bytes, b"x")
+
+    monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
+
+    dest = tmp_path / "out.conf"
+    await _tool_call(
+        server,
+        "fetch_file",
+        host="r2d2",
+        snapshot="rpool/data@daily-1",
+        # Legitimate filename containing shell metacharacters.
+        path="etc/$(whoami)' file;.conf",
+        local_path=str(dest),
+    )
+
+    cmd = captured[0]
+    source = next(arg for arg in cmd if arg.startswith("r2d2.lan:"))
+    # The path portion after `host:` must be single-quoted (shlex.quote
+    # form) so the remote shell sees literal metacharacters, not a
+    # subshell / command separator.
+    path_portion = source.split(":", 1)[1]
+    assert path_portion.startswith("'")
+    assert path_portion.endswith("'")
+    assert "$(whoami)" in path_portion  # the literal text, inside the quotes
+
+
 async def test_fetch_file_builds_scp_command(
     cfg: Config,
     tmp_path: Path,
