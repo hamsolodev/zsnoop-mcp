@@ -605,7 +605,8 @@ def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
         validate_dataset(dataset)
         args += ["-r", dataset]
     out = run_zfs(args)
-    snaps = []
+    snaps: list[dict[str, Any]] = []
+    truncated = False
     for line in out.splitlines():
         if not line:
             continue
@@ -615,6 +616,12 @@ def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
             continue
         if before_ts is not None and (creation_int is None or creation_int > before_ts):
             continue
+        if max_results is not None and len(snaps) >= max_results:
+            # We have enough matches and we've now seen one more — flag
+            # truncation and stop without paying for the dict construction
+            # for this row (or any after it).
+            truncated = True
+            break
         ds, snap = name.split("@", 1) if "@" in name else (name, "")
         snaps.append(
             {
@@ -628,8 +635,6 @@ def m_list_snapshots(params: dict[str, Any]) -> dict[str, Any]:
         )
     result: dict[str, Any] = {"snapshots": snaps}
     if max_results is not None:
-        truncated = len(snaps) > max_results
-        result["snapshots"] = snaps[:max_results]
         result["truncated"] = truncated
     return result
 
