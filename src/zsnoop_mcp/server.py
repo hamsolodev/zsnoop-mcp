@@ -77,8 +77,13 @@ def _validate_local_dest(local_path: str) -> Path:
             f"local_path must be absolute (or ~-expanded): {local_path!r}",
         )
     dest = expanded.resolve()
-    if not dest.parent.is_dir():
-        raise ValueError(f"destination parent is not a directory: {dest.parent}")
+    parent = dest.parent
+    if not parent.exists():
+        raise ValueError(f"destination directory does not exist: {parent}")
+    if not parent.is_dir():
+        # parent exists on disk but isn't a directory (regular file, FIFO,
+        # symlink to a non-dir, etc.) — can't create dest underneath it.
+        raise ValueError(f"cannot write under {parent}: it is not a directory")
     return dest
 
 

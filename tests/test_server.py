@@ -380,7 +380,7 @@ async def test_fetch_file_rejects_missing_parent(
     pool = _make_fetch_pool("/data")
     server = create_server(pool, cfg)  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="parent is not a directory"):
+    with pytest.raises(ValueError, match="directory does not exist"):
         await _tool_call(
             server,
             "fetch_file",
@@ -401,7 +401,7 @@ async def test_fetch_file_rejects_parent_that_is_a_file(
     parent_as_file = tmp_path / "not_a_dir"
     parent_as_file.write_text("oops")
 
-    with pytest.raises(ValueError, match="parent is not a directory"):
+    with pytest.raises(ValueError, match="is not a directory"):
         await _tool_call(
             server,
             "fetch_file",
