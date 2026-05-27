@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import os
+import pathlib
 from typing import Any
 
 import pytest
@@ -1155,3 +1158,71 @@ def test_bisect_change_returns_no_transition_with_single_snapshot(
     )
     assert result["transition"] is None
     assert "at least two snapshots" in result["reason"]
+
+
+# ---- checksum_file ---------------------------------------------------------
+
+
+def test_checksum_file_returns_sha256_of_full_content(mock_mountpoint: dict[str, Any]) -> None:
+    result = agent.m_checksum_file(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "hello.txt"},
+    )
+    assert result["snapshot"] == mock_mountpoint["snapshot_name"]
+    assert result["path"] == "hello.txt"
+    assert result["size"] == mock_mountpoint["files"]["hello"].stat().st_size
+    expected = hashlib.sha256(b"hello, world!\n").hexdigest()
+    assert result["sha256"] == expected
+
+
+def test_checksum_file_refuses_symlink(mock_mountpoint: dict[str, Any]) -> None:
+    # sub/link_to_hello -> ../hello.txt stays inside the snapshot root so the
+    # boundary check passes; the symlink refusal fires at lstat() time (G3).
+    with pytest.raises(agent.PathError, match="symlink"):
+        agent.m_checksum_file(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "sub/link_to_hello"},
+        )
+
+
+def test_checksum_file_refuses_directory(mock_mountpoint: dict[str, Any]) -> None:
+    with pytest.raises(agent.PathError, match="not a regular file"):
+        agent.m_checksum_file(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "empty_dir"},
+        )
+
+
+def test_checksum_file_rejects_oversized_file(
+    mock_mountpoint: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Patch pathlib.Path.lstat to report a file larger than MAX_CHECKSUM_FILESIZE.
+    original_lstat = pathlib.Path.lstat
+
+    def fake_lstat(self: pathlib.Path) -> os.stat_result:
+        st = original_lstat(self)
+        return os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                agent.MAX_CHECKSUM_FILESIZE + 1,
+                int(st.st_atime),
+                int(st.st_mtime),
+                int(st.st_ctime),
+            )
+        )
+
+    monkeypatch.setattr(pathlib.Path, "lstat", fake_lstat)
+    with pytest.raises(agent.InvalidParams, match="too large"):
+        agent.m_checksum_file(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "hello.txt"},
+        )
+
+
+def test_checksum_file_rejects_dotdot(mock_mountpoint: dict[str, Any]) -> None:
+    with pytest.raises(agent.PathError):
+        agent.m_checksum_file(
+            {"snapshot": mock_mountpoint["snapshot_name"], "path": "../etc/passwd"},
+        )

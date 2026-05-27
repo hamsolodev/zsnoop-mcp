@@ -36,7 +36,7 @@ def _agent_argv() -> list[str]:
 async def test_agent_info_round_trip() -> None:
     async with AgentConnection("local", _agent_argv()) as conn:
         result = await conn.call("agent_info")
-    assert result["agent_version"] == "0.1.0"
+    assert result["agent_version"] == "0.2.0"
     assert "list_snapshots" in result["methods"]
     assert result["limits"]["max_read_bytes"] > 0
 
@@ -270,7 +270,7 @@ async def test_call_after_close_respawns() -> None:
     await conn.call("agent_info")
     await conn.close()
     result = await conn.call("agent_info")
-    assert result["agent_version"] == "0.1.0"
+    assert result["agent_version"] == "0.2.0"
     await conn.close()
 
 

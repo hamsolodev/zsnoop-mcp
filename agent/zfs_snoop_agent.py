@@ -43,7 +43,7 @@ JsonId = str | int | float | None
 # Constants
 # ----------------------------------------------------------------------------
 
-AGENT_VERSION: Final = "0.1.0"
+AGENT_VERSION: Final = "0.2.0"
 PROTOCOL_VERSION: Final = "1"
 
 # Hard caps the agent will never exceed regardless of caller-provided values.
@@ -86,6 +86,10 @@ DEFAULT_STALE_RESULTS: Final = 1_000
 # bounds the per-evaluation read.
 MAX_BISECT_BYTES: Final = 4 * 1024 * 1024
 DEFAULT_BISECT_BYTES: Final = 1 * 1024 * 1024
+# `checksum_file` hashes the full file in streaming chunks. The hard cap
+# keeps the operation bounded on the remote; files larger than this should
+# be checksummed out-of-band rather than through the MCP transport.
+MAX_CHECKSUM_FILESIZE: Final = 256 * 1024 * 1024
 
 # Subprocess wall-clock timeout for any single zfs / zpool invocation.
 # Suits metadata commands (list, get) which are essentially constant-time.
@@ -305,6 +309,7 @@ class Limits:
     max_top_consumers: int = MAX_TOP_CONSUMERS
     max_stale_results: int = MAX_STALE_RESULTS
     max_bisect_bytes: int = MAX_BISECT_BYTES
+    max_checksum_filesize: int = MAX_CHECKSUM_FILESIZE
     zfs_timeout_seconds: float = ZFS_TIMEOUT_SECONDS
     zfs_diff_timeout_seconds: float = ZFS_DIFF_TIMEOUT_SECONDS
     size_walk_timeout_seconds: float = SIZE_WALK_TIMEOUT_SECONDS
@@ -327,6 +332,7 @@ def m_agent_info(_params: dict[str, Any]) -> dict[str, Any]:
             "max_top_consumers": MAX_TOP_CONSUMERS,
             "max_stale_results": MAX_STALE_RESULTS,
             "max_bisect_bytes": MAX_BISECT_BYTES,
+            "max_checksum_filesize": MAX_CHECKSUM_FILESIZE,
             "zfs_timeout_seconds": ZFS_TIMEOUT_SECONDS,
             "zfs_diff_timeout_seconds": ZFS_DIFF_TIMEOUT_SECONDS,
             "size_walk_timeout_seconds": SIZE_WALK_TIMEOUT_SECONDS,
@@ -1625,6 +1631,54 @@ def m_size_delta(params: dict[str, Any]) -> dict[str, Any]:
     return {"snap_a": snap_a, "snap_b": snap_b, "written_bytes": written}
 
 
+def m_checksum_file(params: dict[str, Any]) -> dict[str, Any]:
+    """SHA-256 of the full content of *path* in *snapshot*, streamed in chunks.
+
+    Unlike ``read_file`` and ``versions_of``, there is no ``max_bytes``
+    truncation: the entire file is hashed. Use this to verify that a
+    recovered copy matches the snapshot original without transferring the
+    content.
+
+    Hard cap: ``MAX_CHECKSUM_FILESIZE`` (256 MiB). Files larger than this
+    should be checksummed out-of-band. Symlinks are refused (G3).
+
+    Returns ``{snapshot, path, size, sha256}``.
+    """
+    snapshot = _require_str(params, "snapshot")
+    path = _require_str(params, "path")
+    _, target = resolve_under_snapshot(snapshot, path)
+    try:
+        st = target.lstat()
+    except OSError as e:
+        raise PathError(f"could not stat: {e}") from e
+    if stat_mod.S_ISLNK(st.st_mode):
+        raise PathError(f"refusing to read symlink: {path!r}")
+    if not stat_mod.S_ISREG(st.st_mode):
+        raise PathError(f"not a regular file: {path!r}")
+    size = st.st_size
+    if size > MAX_CHECKSUM_FILESIZE:
+        raise InvalidParams(
+            f"file too large to checksum via this tool: {size} bytes "
+            f"(limit {MAX_CHECKSUM_FILESIZE}); checksum it out-of-band"
+        )
+    h = hashlib.sha256()
+    try:
+        with target.open("rb") as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+    except OSError as e:
+        raise PathError(f"could not read: {e}") from e
+    return {
+        "snapshot": snapshot,
+        "path": path,
+        "size": size,
+        "sha256": h.hexdigest(),
+    }
+
+
 # ----------------------------------------------------------------------------
 # Method allowlist (defence in depth: G1)
 # ----------------------------------------------------------------------------
@@ -1654,6 +1708,7 @@ METHODS: Final[dict[str, Any]] = {
     "bisect_change": m_bisect_change,
     "stale_snapshots": m_stale_snapshots,
     "size_delta": m_size_delta,
+    "checksum_file": m_checksum_file,
 }
 
 

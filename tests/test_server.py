@@ -6,7 +6,9 @@ stays hermetic. The goal is to assert that the server:
 - forwards parameters correctly (including stripping defaults / Nones),
 - validates host names against the config,
 - parses time phrases into ISO 8601 before forwarding,
-- maps AgentRpcError to ValueError and TransportError to RuntimeError.
+- maps AgentRpcError to ValueError and TransportError to RuntimeError,
+- injects queried_at into every _call() result,
+- fetch_file / fetch_dir build the correct scp command.
 
 We don't spin up FastMCP's stdio loop here; we exercise the registered
 tool callables directly via FastMCP's introspection helpers.
@@ -14,10 +16,14 @@ tool callables directly via FastMCP's introspection helpers.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import zsnoop_mcp.server as srv_mod
 from zsnoop_mcp.config import Config, HostConfig
 from zsnoop_mcp.server import create_server
 from zsnoop_mcp.transport import AgentRpcError, TransportError
@@ -102,6 +108,9 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "bisect_change",
         "stale_snapshots",
         "size_delta",
+        "checksum_file",
+        "fetch_file",
+        "fetch_dir",
     }
 
 
@@ -248,3 +257,201 @@ async def test_transport_error_becomes_runtime_error(cfg: Config, fake_pool: Fak
     server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
     with pytest.raises(RuntimeError, match="transport error"):
         await _tool_call(server, "list_datasets", host="r2d2")
+
+
+# ---- queried_at injection --------------------------------------------------
+
+
+async def test_call_injects_queried_at(cfg: Config, fake_pool: FakePool) -> None:
+    fake_pool.next_result = {"pools": []}
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    result = await _tool_call(server, "list_pools", host="r2d2")
+    assert "queried_at" in result
+    # Should be a valid ISO 8601 UTC timestamp.
+    dt = datetime.fromisoformat(result["queried_at"])
+    assert dt.tzname() in ("+00:00", "UTC")
+
+
+# ---- checksum_file ----------------------------------------------------------
+
+
+async def test_checksum_file_forwards_params(cfg: Config, fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    await _tool_call(server, "checksum_file", host="r2d2", snapshot="rpool@s", path="etc/foo")
+    assert fake_pool.calls == [
+        ("r2d2", "checksum_file", {"snapshot": "rpool@s", "path": "etc/foo"}),
+    ]
+
+
+# ---- fetch_file / fetch_dir -------------------------------------------------
+
+
+def _make_fetch_pool(mountpoint: str) -> FakePool:
+    """A FakePool that returns a realistic dataset_properties response."""
+    pool = FakePool()
+    pool.next_result = {
+        "dataset": "rpool/data",
+        "properties": [{"name": "mountpoint", "value": mountpoint, "source": "local"}],
+    }
+    return pool
+
+
+async def test_fetch_file_builds_scp_command(
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    captured: list[list[str]] = []
+
+    async def fake_run_fetch(cmd: list[str]) -> None:
+        captured.append(cmd)
+        # Write via thread to satisfy the no-sync-IO-in-async-context rule.
+        await asyncio.to_thread(Path(cmd[-1]).write_bytes, b"fake content")
+
+    monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
+
+    dest = tmp_path / "recovered.conf"
+    result = await _tool_call(
+        server,
+        "fetch_file",
+        host="r2d2",
+        snapshot="rpool/data@daily-1",
+        path="etc/app.conf",
+        local_path=str(dest),
+    )
+
+    assert len(captured) == 1
+    cmd = captured[0]
+    assert cmd[0] == "scp"
+    assert "r2d2.lan:/data/.zfs/snapshot/daily-1/etc/app.conf" in cmd
+    assert str(dest) == cmd[-1]
+    assert result["local_path"] == str(dest)
+    assert result["size_bytes"] == len(b"fake content")
+    assert "queried_at" in result
+
+
+async def test_fetch_file_rejects_existing_dest_without_overwrite(
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    existing = tmp_path / "existing.conf"
+    existing.write_text("already here")
+
+    with pytest.raises(ValueError, match="already exists"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="etc/app.conf",
+            local_path=str(existing),
+        )
+
+
+async def test_fetch_file_rejects_dotdot_path(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="parent-directory"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="../etc/passwd",
+            local_path=str(tmp_path / "out"),
+        )
+
+
+async def test_fetch_file_rejects_missing_parent(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="parent directory does not exist"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="etc/app.conf",
+            local_path=str(tmp_path / "nonexistent" / "out.conf"),
+        )
+
+
+async def test_fetch_dir_builds_scp_recursive_command(
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    captured: list[list[str]] = []
+
+    async def fake_run_fetch(cmd: list[str]) -> None:
+        captured.append(cmd)
+
+    monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
+
+    dest = tmp_path / "restored_dir"
+    result = await _tool_call(
+        server,
+        "fetch_dir",
+        host="r2d2",
+        snapshot="rpool/data@daily-1",
+        path="home/alice",
+        local_path=str(dest),
+    )
+
+    assert len(captured) == 1
+    cmd = captured[0]
+    assert cmd[0] == "scp"
+    assert "-r" in cmd
+    assert "r2d2.lan:/data/.zfs/snapshot/daily-1/home/alice" in cmd
+    assert str(dest) == cmd[-1]
+    assert result["local_path"] == str(dest)
+    assert "queried_at" in result
+
+
+async def test_fetch_file_local_transport_uses_cp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_cfg = Config(
+        hosts={"local": HostConfig(name="local", transport="local", ssh_target="")},
+    )
+    pool = _make_fetch_pool(str(tmp_path / "zfs_mount"))
+    server = create_server(pool, local_cfg)  # type: ignore[arg-type]
+
+    captured: list[list[str]] = []
+
+    async def fake_run_fetch(cmd: list[str]) -> None:
+        captured.append(cmd)
+        await asyncio.to_thread(Path(cmd[-1]).write_bytes, b"x")
+
+    monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
+
+    dest = tmp_path / "out.conf"
+    await _tool_call(
+        server,
+        "fetch_file",
+        host="local",
+        snapshot="rpool/data@s1",
+        path="etc/foo",
+        local_path=str(dest),
+    )
+    assert captured[0][0] == "cp"
+    assert "-r" not in captured[0]
