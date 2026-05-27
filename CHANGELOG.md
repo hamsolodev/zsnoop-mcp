@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`list_snapshots` time filtering and optional cap.** New optional
+  parameters `after`, `before` (ISO 8601 or human phrases like
+  `yesterday` / `last week`), and `max_results`. Filtering happens
+  agent-side so the on-wire response stays small — the motivating case
+  was "what snapshots were created yesterday?" on a busy host returning
+  ~400 KB of JSON (thousands of entries) just to extract ~200. With
+  `after="yesterday"` the same query stays a fraction of that size.
+  Defaults are all `None` (no filter, no cap), so existing callers
+  including `m_snapshot_cadence` behave unchanged. New limit
+  `max_list_snapshots = 10 000` exposed via `agent_info.limits`.
+
 ## [0.2.0] — 2026-05-27
 
 ### Added

@@ -148,6 +148,39 @@ async def test_list_snapshots_includes_dataset_when_given(cfg: Config, fake_pool
     assert fake_pool.calls == [("r2d2", "list_snapshots", {"dataset": "rpool/home"})]
 
 
+async def test_list_snapshots_translates_after_phrase(cfg: Config, fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    await _tool_call(server, "list_snapshots", host="r2d2", after="yesterday")
+    assert len(fake_pool.calls) == 1
+    _h, method, params = fake_pool.calls[0]
+    assert method == "list_snapshots"
+    assert params is not None
+    assert "after" in params
+    assert params["after"].endswith("+00:00")
+    assert "before" not in params  # before was None — must not be forwarded
+    assert "dataset" not in params
+
+
+async def test_list_snapshots_forwards_max_results(cfg: Config, fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    await _tool_call(
+        server,
+        "list_snapshots",
+        host="r2d2",
+        dataset="rpool/home",
+        max_results=500,
+    )
+    assert fake_pool.calls == [
+        ("r2d2", "list_snapshots", {"dataset": "rpool/home", "max_results": 500}),
+    ]
+
+
+async def test_list_snapshots_rejects_bad_time_phrase(cfg: Config, fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="could not parse time phrase"):
+        await _tool_call(server, "list_snapshots", host="r2d2", after="never")
+
+
 async def test_read_file_omits_max_bytes_when_none(cfg: Config, fake_pool: FakePool) -> None:
     server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
     await _tool_call(server, "read_file", host="r2d2", snapshot="rpool@a", path="foo")

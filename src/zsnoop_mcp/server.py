@@ -238,14 +238,47 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         return await _call(host, "dataset_properties", params)
 
     @mcp.tool()
-    async def list_snapshots(host: str, dataset: str | None = None) -> dict[str, Any]:
+    async def list_snapshots(
+        host: str,
+        dataset: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        max_results: int | None = None,
+    ) -> dict[str, Any]:
         """List ZFS snapshots on `host`, optionally scoped to `dataset` (recursive).
 
         Each snapshot reports its creation time as a Unix timestamp.
+
+        For time-bounded questions ("what was snapshotted yesterday?"),
+        pass ``after`` / ``before`` — they accept ISO 8601 timestamps *or*
+        phrases like ``yesterday``, ``last week``, ``3 days ago``. Filtering
+        happens agent-side so the on-wire response stays small.
+
+        ``max_results`` is an opt-in cap (hard max 10 000); the response
+        includes ``truncated=true`` when exceeded. Omit it to get all
+        matching snapshots — but note that on busy hosts with thousands of
+        snapshots an unfiltered, uncapped call can exceed the per-tool
+        token budget. Either narrow with ``dataset`` / ``after`` / ``before``
+        or pass ``max_results``.
+
         For aggregate summary statistics (counts by retention class,
         biggest gap, total unique bytes), prefer ``snapshot_cadence``.
         """
-        return await _call(host, "list_snapshots", {"dataset": dataset} if dataset else None)
+        try:
+            after_iso = maybe_to_iso(after)
+            before_iso = maybe_to_iso(before)
+        except TimePhraseError as e:
+            raise ValueError(f"could not parse time phrase: {e}") from e
+        params: dict[str, Any] = {}
+        if dataset is not None:
+            params["dataset"] = dataset
+        if after_iso is not None:
+            params["after"] = after_iso
+        if before_iso is not None:
+            params["before"] = before_iso
+        if max_results is not None:
+            params["max_results"] = max_results
+        return await _call(host, "list_snapshots", params if params else None)
 
     @mcp.tool()
     async def snapshot_cadence(host: str, dataset: str | None = None) -> dict[str, Any]:
