@@ -30,10 +30,11 @@ import stat as stat_mod
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, BinaryIO, Final
 
 # A JSON-RPC ``id`` is per spec a string, number, or null. We type-erase to
 # ``object`` at the boundary because we don't introspect it.
@@ -51,6 +52,14 @@ MAX_READ_BYTES: Final = 4 * 1024 * 1024
 MAX_DIR_ENTRIES: Final = 10_000
 MAX_FIND_RESULTS: Final = 1_000
 MAX_GREP_RESULTS: Final = 1_000
+# `content_grep` per-line read cap. A line longer than this is treated as a
+# pathological / binary-flavoured file and the scan moves on to the next
+# file rather than buffering the whole "line" (a 1 GiB binary with no \n
+# would otherwise be read entirely into memory before being rejected).
+MAX_GREP_LINE_BYTES: Final = 1 * 1024 * 1024
+# Bytes peeked from a file's head to sniff for binary content (null byte
+# presence — the long-standing `file(1)` heuristic).
+_GREP_BINARY_SNIFF_BYTES: Final = 8 * 1024
 # Total filesystem entries the recursive `size_breakdown` walk may visit
 # before returning a truncated result. 1M lstat calls is roughly 5-10s of
 # wall-clock on a hot cache; SIZE_WALK_TIMEOUT_SECONDS is the hard backstop.
@@ -1318,6 +1327,25 @@ def m_find_files(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _capped_readlines(fh: BinaryIO) -> Iterator[bytes | None]:
+    """Iterate lines from *fh* up to ``MAX_GREP_LINE_BYTES`` each.
+
+    Yields the line bytes (with trailing newline if present) like the
+    normal iter(fh), but caps each ``readline`` call so a file with no
+    newlines can't blow up memory. Yields ``None`` exactly once to mark
+    the cap was hit on the current line, then stops; the caller treats
+    that as "this file is pathological, move on".
+    """
+    while True:
+        raw = fh.readline(MAX_GREP_LINE_BYTES)
+        if not raw:
+            return
+        if len(raw) == MAX_GREP_LINE_BYTES and not raw.endswith(b"\n"):
+            yield None
+            return
+        yield raw
+
+
 def m_content_grep(params: dict[str, Any]) -> dict[str, Any]:
     snapshot = _require_str(params, "snapshot")
     pattern = _require_str(params, "pattern")
@@ -1337,21 +1365,47 @@ def m_content_grep(params: dict[str, Any]) -> dict[str, Any]:
         raise PathError(f"not a file or directory: {base!r}")
     matches: list[dict[str, Any]] = []
     truncated = False
-    files: list[Path] = [target] if target.is_file() else []
-    if target.is_dir():
+
+    def _file_iter() -> Iterator[Path]:
+        # Walk lazily so we stop the moment max_results is reached, instead
+        # of materialising every path under `target` first (the previous
+        # implementation pre-built a list of every file in the subtree,
+        # which on a 1M-file snapshot was a big memory spike before the
+        # first regex match).
+        if target.is_file():
+            yield target
+            return
         for dirpath, _dirnames, filenames in os.walk(target, followlinks=False):
             for name in filenames:
-                files.append(Path(dirpath) / name)
-    for f in files:
+                yield Path(dirpath) / name
+
+    for f in _file_iter():
         if truncated:
             break
         try:
             with f.open("rb") as fh:
-                for lineno, raw in enumerate(fh, start=1):
+                head = fh.read(_GREP_BINARY_SNIFF_BYTES)
+                if b"\x00" in head:
+                    # Standard binary-detection heuristic. Skip without
+                    # iterating — avoids the worst-case "no newline in a
+                    # 1 GiB binary file" OOM where the readline iterator
+                    # would buffer the whole file before raising
+                    # UnicodeDecodeError on decode.
+                    continue
+                fh.seek(0)
+                for lineno, raw in enumerate(_capped_readlines(fh), start=1):
+                    if raw is None:
+                        # Line exceeded MAX_GREP_LINE_BYTES; treat as
+                        # pathological text (minified JSON, single-line
+                        # CSV exports, etc.) and stop on this file rather
+                        # than read more of it into memory.
+                        break
                     try:
                         line = raw.decode("utf-8")
                     except UnicodeDecodeError:
-                        break  # skip binary file
+                        # Latent text-then-binary (UTF-16 segment, etc.).
+                        # Skip the rest of this file but keep going.
+                        break
                     if rx.search(line):
                         matches.append(
                             {
@@ -1952,7 +2006,24 @@ def main() -> int:
         response = handle_request(line)
         if response is None:
             continue
-        sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+        try:
+            serialised = json.dumps(response, separators=(",", ":"))
+        except (TypeError, ValueError) as e:
+            # A handler returned something json can't encode (bytes, a set,
+            # a datetime, ...). Refuse to die — synthesise an INTERNAL_ERROR
+            # response so the wire stays synchronised and the LLM gets a
+            # real error instead of a silent hang while the server waits
+            # for a reply that will never come.
+            log.exception("non-serialisable handler result for request id=%r", response.get("id"))
+            serialised = json.dumps(
+                make_error(
+                    response.get("id"),
+                    INTERNAL_ERROR,
+                    f"handler returned non-serialisable result: {e}",
+                ),
+                separators=(",", ":"),
+            )
+        sys.stdout.write(serialised + "\n")
         sys.stdout.flush()
     return 0
 

@@ -256,6 +256,39 @@ async def test_id_mismatch_raises_transport_error(tmp_path: Path) -> None:
 # ---- lifecycle --------------------------------------------------------------
 
 
+async def test_agent_survives_non_serialisable_handler_result(tmp_path: Path) -> None:
+    """If a handler returns something json.dumps can't encode, the agent
+    must NOT crash and leave the LLM hanging waiting for a response. It
+    should emit an INTERNAL_ERROR response so the wire stays synchronised
+    and the next call works against the same subprocess.
+
+    Stages a tiny standalone agent that registers a method returning bytes.
+    """
+    script = tmp_path / "bad_method_agent.py"
+    script.write_text(
+        textwrap.dedent(f"""\
+            import sys
+            sys.path.insert(0, {str(AGENT_PATH.parent)!r})
+            import zfs_snoop_agent as agent
+            agent.METHODS["bad"] = lambda _p: {{"x": b"not json-encodable"}}
+            sys.exit(agent.main())
+        """),
+    )
+    async with AgentConnection(
+        "bad-handler",
+        [sys.executable, str(script)],
+        max_reconnects=0,
+    ) as conn:
+        # The bad method surfaces as an AgentRpcError (INTERNAL_ERROR), not
+        # a transport failure — proving the agent caught the serialise
+        # error and stayed alive.
+        with pytest.raises(AgentRpcError, match="non-serialisable"):
+            await conn.call("bad")
+        # Subsequent calls still work against the same subprocess.
+        result = await conn.call("agent_info")
+        assert result["agent_version"] == "0.2.0"
+
+
 async def test_recv_timeout_tears_down_subprocess(tmp_path: Path) -> None:
     """A recv timeout means the agent is in an unknown state from our
     perspective — any late response would land in the pipe and surface as
