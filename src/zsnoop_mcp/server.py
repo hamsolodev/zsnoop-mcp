@@ -64,30 +64,43 @@ def _validate_fetch_path(path: str) -> str:
     return stripped
 
 
-def _validate_local_dest(local_path: str, *, overwrite: bool) -> Path:
-    """Resolve and validate the caller-supplied local destination.
+def _validate_local_dest(local_path: str) -> Path:
+    """Resolve and validate the caller-supplied local destination path.
 
-    Raises ``ValueError`` if the parent directory does not exist, or if the
-    destination already exists and ``overwrite`` is False.
+    Ensures the path is absolute (after ``~`` expansion) and its parent is a
+    real directory. Existence semantics for the destination itself are left to
+    the caller — ``fetch_file`` and ``fetch_dir`` have different requirements.
     """
-    dest = Path(local_path).expanduser().resolve()
-    if not dest.parent.exists():
-        raise ValueError(f"destination parent directory does not exist: {dest.parent}")
-    if dest.exists() and not overwrite:
-        raise ValueError(f"destination already exists: {dest} — pass overwrite=true to replace it")
+    expanded = Path(local_path).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(
+            f"local_path must be absolute (or ~-expanded): {local_path!r}",
+        )
+    dest = expanded.resolve()
+    if not dest.parent.is_dir():
+        raise ValueError(f"destination parent is not a directory: {dest.parent}")
     return dest
 
 
 async def _run_fetch(cmd: list[str]) -> None:
-    """Run *cmd* as a subprocess, raising ``RuntimeError`` on failure or timeout."""
+    """Run *cmd* as a subprocess, raising ``RuntimeError`` on failure or timeout.
+
+    On timeout the child is SIGKILLed and reaped before we raise, so we never
+    leak a background ``scp``/``cp`` that keeps using the network and disk.
+    Stdin is wired to /dev/null so a misconfigured ``scp`` cannot block waiting
+    for interactive input despite ``BatchMode=yes``.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_FETCH_TIMEOUT_SECONDS)
     except TimeoutError as e:
+        proc.kill()
+        await proc.wait()
         raise RuntimeError(f"fetch timed out after {_FETCH_TIMEOUT_SECONDS:.0f}s") from e
     if proc.returncode != 0:
         msg = stderr.decode("utf-8", "replace").strip()
@@ -138,8 +151,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         _validate_host(host)
         try:
             result = await pool.call(host, method, params)
-            result["queried_at"] = datetime.now(UTC).isoformat()
-            return result
+            return {**result, "queried_at": datetime.now(UTC).isoformat()}
         except AgentRpcError as e:
             raise ValueError(f"agent error ({e.code}): {e.message}") from e
         except TransportError as e:
@@ -620,8 +632,10 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
 
         ``path`` is relative to the snapshot root (leading ``/`` is stripped).
         ``local_path`` is an absolute or ``~``-expanded path on this machine;
-        its parent directory must already exist. Set ``overwrite=true`` to
-        replace an existing file — the default is to refuse.
+        its parent directory must already exist. Directory destinations are
+        rejected even with ``overwrite=true`` — pass an explicit file path so
+        the returned ``local_path`` and ``size_bytes`` are unambiguous. Set
+        ``overwrite=true`` to replace an existing file; the default is to refuse.
 
         Returns ``{snapshot, path, local_path, size_bytes, queried_at}``.
         """
@@ -629,12 +643,18 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         host_config = config.host(host)
         try:
             fetch_path = _validate_fetch_path(path)
+            dest = _validate_local_dest(local_path)
         except ValueError as e:
             raise ValueError(str(e)) from e
-        try:
-            dest = _validate_local_dest(local_path, overwrite=overwrite)
-        except ValueError as e:
-            raise ValueError(str(e)) from e
+        if dest.exists():
+            if dest.is_dir():
+                raise ValueError(
+                    f"destination is a directory; fetch_file needs an explicit file path: {dest}",
+                )
+            if not overwrite:
+                raise ValueError(
+                    f"destination already exists: {dest} — pass overwrite=true to replace it",
+                )
         dataset, snapname = _parse_snapshot_name(snapshot)
         props = await _call(
             host, "dataset_properties", {"dataset": dataset, "properties": ["mountpoint"]}
@@ -663,7 +683,6 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         snapshot: str,
         path: str,
         local_path: str,
-        overwrite: bool = False,
     ) -> dict[str, Any]:
         """Copy a directory subtree from a ZFS snapshot to `local_path` on this machine.
 
@@ -673,8 +692,10 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
 
         ``path`` is relative to the snapshot root (leading ``/`` is stripped).
         ``local_path`` is an absolute or ``~``-expanded path on this machine;
-        its parent directory must already exist. Set ``overwrite=true`` to
-        allow writing into an existing destination — the default is to refuse.
+        its parent directory must already exist, and ``local_path`` itself
+        must NOT already exist — ``scp -r`` / ``cp -ar`` semantics for
+        existing destinations are ambiguous (some copy *into*, some
+        *populate*), so the caller is required to clear it first.
 
         Returns ``{snapshot, path, local_path, queried_at}``.
         """
@@ -682,12 +703,14 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         host_config = config.host(host)
         try:
             fetch_path = _validate_fetch_path(path)
+            dest = _validate_local_dest(local_path)
         except ValueError as e:
             raise ValueError(str(e)) from e
-        try:
-            dest = _validate_local_dest(local_path, overwrite=overwrite)
-        except ValueError as e:
-            raise ValueError(str(e)) from e
+        if dest.exists():
+            raise ValueError(
+                f"destination already exists: {dest} — remove it first; "
+                f"fetch_dir requires a non-existent destination",
+            )
         dataset, snapname = _parse_snapshot_name(snapshot)
         props = await _call(
             host, "dataset_properties", {"dataset": dataset, "properties": ["mountpoint"]}

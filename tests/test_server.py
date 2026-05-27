@@ -380,7 +380,7 @@ async def test_fetch_file_rejects_missing_parent(
     pool = _make_fetch_pool("/data")
     server = create_server(pool, cfg)  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="parent directory does not exist"):
+    with pytest.raises(ValueError, match="parent is not a directory"):
         await _tool_call(
             server,
             "fetch_file",
@@ -388,6 +388,68 @@ async def test_fetch_file_rejects_missing_parent(
             snapshot="rpool/data@daily-1",
             path="etc/app.conf",
             local_path=str(tmp_path / "nonexistent" / "out.conf"),
+        )
+
+
+async def test_fetch_file_rejects_parent_that_is_a_file(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    parent_as_file = tmp_path / "not_a_dir"
+    parent_as_file.write_text("oops")
+
+    with pytest.raises(ValueError, match="parent is not a directory"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="etc/app.conf",
+            local_path=str(parent_as_file / "out.conf"),
+        )
+
+
+async def test_fetch_file_rejects_relative_local_path(
+    cfg: Config,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="must be absolute"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="etc/app.conf",
+            local_path="relative/out.conf",
+        )
+
+
+async def test_fetch_file_rejects_directory_destination(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    dest_dir = tmp_path / "existing_dir"
+    dest_dir.mkdir()
+
+    # Even with overwrite=True, a directory destination is refused — scp/cp
+    # would copy *into* the directory, breaking the returned local_path.
+    with pytest.raises(ValueError, match="destination is a directory"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="etc/app.conf",
+            local_path=str(dest_dir),
+            overwrite=True,
         )
 
 
@@ -424,6 +486,43 @@ async def test_fetch_dir_builds_scp_recursive_command(
     assert str(dest) == cmd[-1]
     assert result["local_path"] == str(dest)
     assert "queried_at" in result
+
+
+async def test_fetch_dir_rejects_existing_destination(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+
+    existing = tmp_path / "already_here"
+    existing.mkdir()
+
+    with pytest.raises(ValueError, match="destination already exists"):
+        await _tool_call(
+            server,
+            "fetch_dir",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="home/alice",
+            local_path=str(existing),
+        )
+
+
+async def test_run_fetch_kills_subprocess_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hanging subprocess must be SIGKILLed and reaped, not leaked."""
+    monkeypatch.setattr(srv_mod, "_FETCH_TIMEOUT_SECONDS", 0.1)
+
+    # Use /bin/sleep so we have a real process that will outlive the timeout.
+    with pytest.raises(RuntimeError, match="timed out"):
+        await srv_mod._run_fetch(["sleep", "5"])
+
+    # Give the event loop a tick to finish reaping. The kill+wait happens
+    # inline in _run_fetch, so by the time we get here the child is gone.
+    # No easy cross-platform way to assert PID is dead, but if reap didn't
+    # happen we'd see a ResourceWarning under filterwarnings=error.
 
 
 async def test_fetch_file_local_transport_uses_cp(

@@ -53,8 +53,9 @@ from the same snapshot and don't want to `fetch_file` them one by one.
 After fetching a file, compute the snapshot's SHA-256 with
 `checksum_file(host="r2d2", snapshot=…, path="etc/nginx/nginx.conf")` and
 compare the `sha256` field against a local `sha256sum` of the recovered file.
-Unlike `read_file`, `checksum_file` is not capped at 4 MiB — it hashes the
-full file on the remote side and returns only the digest.
+Unlike `read_file` (capped at 4 MiB), `checksum_file` hashes the full file on
+the remote side and returns only the digest. It enforces a 256 MiB hard cap
+per file; for anything larger, run `sha256sum` directly on the host.
 
 ## Config drift audit — "when did X change?"
 
