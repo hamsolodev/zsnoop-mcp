@@ -7,11 +7,16 @@ them here so the agent stays simple and consistent.
 Supported phrases (case-insensitive, leading/trailing whitespace ignored):
 
 - ``now``
-- ``today`` (00:00:00 of the current day in local time)
-- ``yesterday`` (00:00:00 of the previous day)
+- ``today`` (00:00:00 UTC of the current day)
+- ``yesterday`` (00:00:00 UTC of the previous day)
 - ``N {seconds|minutes|hours|days|weeks|months|years} ago``
-- ``last {hour|day|week|month|year}`` (start of the previous unit)
-- An ISO 8601 timestamp (returned unchanged after a round-trip validation)
+- ``last {hour|day|week|month|year}`` (start of the previous unit, UTC)
+- An ISO 8601 timestamp (passed through; naive values are treated as UTC)
+
+All anchors are UTC because the agent compares against ZFS ``creation``
+timestamps which are stored as UTC seconds since the epoch. In TZs west
+of UTC, "today" therefore starts a few hours before local midnight —
+acceptable for filtering since the agent only knows UTC anyway.
 """
 
 from __future__ import annotations

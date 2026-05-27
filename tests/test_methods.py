@@ -665,6 +665,44 @@ def test_content_grep_rejects_invalid_regex(mock_mountpoint: dict[str, Any]) -> 
         )
 
 
+def test_content_grep_skips_binary_files_via_null_byte_sniff(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    """Files with null bytes in the first 8 KiB are skipped without being
+    line-iterated, so a pathological no-newline binary can't OOM the agent
+    by buffering the whole 'line' before hitting UnicodeDecodeError."""
+    # big.bin in the fixture is 1.14 MiB of \xff\xfe\xfd\xfc — no null bytes
+    # actually. Add a real null-byte binary to the snapshot for this test.
+    snap_root = mock_mountpoint["snap_root"]
+    (snap_root / "binary_no_newlines.bin").write_bytes(b"\x00\x01\x02" * 100_000)
+    # The pattern would match the surrounding fixture file content but must
+    # NOT match anything inside the binary (which would be skipped).
+    result = agent.m_content_grep(
+        {"snapshot": mock_mountpoint["snapshot_name"], "pattern": ".*"},
+    )
+    paths = {m["path"] for m in result["matches"]}
+    assert "binary_no_newlines.bin" not in paths
+
+
+def test_content_grep_caps_pathological_single_line_files(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    """A text file with no newlines and a line longer than the cap is
+    skipped rather than buffered into memory. Verifies the readline cap."""
+    snap_root = mock_mountpoint["snap_root"]
+    # No null byte (passes the binary sniff) but no newline either — would
+    # have been read entirely into memory by the old code.
+    long_line = b"A" * (agent.MAX_GREP_LINE_BYTES + 10)
+    (snap_root / "huge_line.txt").write_bytes(long_line)
+    result = agent.m_content_grep(
+        {"snapshot": mock_mountpoint["snapshot_name"], "pattern": "AAA"},
+    )
+    paths = {m["path"] for m in result["matches"]}
+    # We didn't crash; we got results for the other small text files; and
+    # the huge-line file did not yield matches because the cap stopped us.
+    assert "huge_line.txt" not in paths
+
+
 # ---- file_history / snapshots_containing / first_appearance -----------------
 
 

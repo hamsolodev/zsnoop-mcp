@@ -189,12 +189,21 @@ def _parse_host(name: str, stanza: dict[str, Any]) -> HostConfig:
         ssh_target=_optional_str(name, stanza, "ssh_target", ""),
         transport=_optional_str(name, stanza, "transport", "ssh"),  # type: ignore[arg-type]
         agent_mode=_optional_str(name, stanza, "agent_mode", "bootstrap"),  # type: ignore[arg-type]
-        agent_path=stanza.get("agent_path"),
+        agent_path=_optional_nullable_str(name, stanza, "agent_path"),
         sudo=_optional_bool(name, stanza, "sudo", default=False),
         remote_python=_optional_str(name, stanza, "remote_python", "python3"),
         ssh_options=_optional_str_list(name, stanza, "ssh_options"),
         pools=_optional_str_list(name, stanza, "pools"),
     )
+
+
+def _optional_nullable_str(host: str, stanza: dict[str, Any], key: str) -> str | None:
+    if key not in stanza:
+        return None
+    value = stanza[key]
+    if not isinstance(value, str):
+        raise ConfigError(f"host {host!r}: {key!r} must be a string")
+    return value
 
 
 def _optional_str(host: str, stanza: dict[str, Any], key: str, default: str) -> str:

@@ -113,6 +113,24 @@ def test_empty_config_rejected() -> None:
         parse_config({"hosts": {}})
 
 
+def test_non_string_agent_path_rejected() -> None:
+    """Previously agent_path was passed through unchecked via `stanza.get(...)`,
+    so a non-string would crash subprocess.exec later with a confusing
+    TypeError. Catch it at config-load time with a clear error."""
+    with pytest.raises(ConfigError, match=r"agent_path.*must be a string"):
+        parse_config(
+            {
+                "hosts": {
+                    "x": {
+                        "ssh_target": "x",
+                        "agent_mode": "preinstalled",
+                        "agent_path": 42,
+                    },
+                },
+            },
+        )
+
+
 def test_missing_hosts_table_rejected() -> None:
     with pytest.raises(ConfigError, match="\\[hosts\\] table"):
         parse_config({})

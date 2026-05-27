@@ -23,6 +23,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent no longer crashes on a non-JSON-serialisable handler result.**
+  The agent's main loop called `json.dumps(response)` directly; if a
+  handler ever returned bytes / a set / a datetime / etc., the dumps
+  would raise and kill the agent — leaving the server hung waiting for
+  a reply. The serialise step is now wrapped: a synthetic `INTERNAL_ERROR`
+  response is emitted instead and the agent stays up. No current handler
+  produces such a value, but defensive coding here keeps a future bug
+  from becoming a transport-level hang.
+- **`content_grep` could OOM on pathological files.** Two issues: it
+  pre-materialised the full file list under the search base before
+  scanning (a 1 M-file snapshot would build a 1 M-element list before
+  the first match), and it iterated each file's lines in binary mode —
+  so a single binary file with no newline (or any 1 GiB single-line text
+  file) was read entirely into memory before either a UnicodeDecodeError
+  or a useless match was raised. Now: walk lazily so iteration stops the
+  moment `max_results` is hit; sniff the first 8 KiB for null bytes and
+  skip the file if found; cap each line read at 1 MiB
+  (`MAX_GREP_LINE_BYTES`) and move on if exceeded.
+- **`agent_path` was passed through config unchecked.** A non-string
+  value (e.g. `agent_path = 42`) would slip past the loader and crash
+  `subprocess.exec` later with a TypeError. Now validated as a nullable
+  string at config-load time, matching the other host-stanza fields.
+- **`today` / `yesterday` docstring corrected.** The docstring claimed
+  "local time" but the implementation uses UTC midnight (consistent with
+  ZFS's UTC `creation` timestamps). Docs now match.
+
 - **Transport recv-timeout caused chained failures.** The 60 s default
   `recv_timeout` was shorter than the agent's `ZFS_DIFF_TIMEOUT_SECONDS`
   (300 s), so a legitimate long-running `diff_snapshots` / `find_deleted`
