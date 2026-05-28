@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -221,6 +222,20 @@ def _first_run_noisy_agent(tmp_path: Path) -> Path:
     return script
 
 
+async def _wait_for(predicate: Callable[[], bool], *, deadline_secs: float = 2.0) -> bool:
+    """Poll *predicate* until true or *deadline_secs* elapses. Returns the result.
+
+    Used in place of fixed sleeps so the test doesn't burn 200 ms on slow
+    CI and doesn't risk false negatives on truly slow hosts.
+    """
+    deadline = asyncio.get_running_loop().time() + deadline_secs
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
+
+
 async def test_respawn_resets_stderr_tail_after_natural_death(tmp_path: Path) -> None:
     """When a subprocess dies naturally (returncode set, no _close_proc),
     the respawn path must call _close_proc to reset _stderr_tail —
@@ -231,17 +246,24 @@ async def test_respawn_resets_stderr_tail_after_natural_death(tmp_path: Path) ->
     argv = [sys.executable, str(script)]
     async with AgentConnection("noisy", argv) as conn:
         await conn.call("agent_info")
-        # Let the drainer capture the stderr marker before the process exits.
-        await asyncio.sleep(0.1)
-        # Sanity: the marker was in fact captured by the first drainer.
-        assert any("MARKER_FROM_FIRST_PROCESS" in line for line in conn._stderr_tail)
+        # Wait for the drainer to actually capture the stderr marker
+        # before the first process exits. Polling is more robust than a
+        # fixed sleep on busy CI runners.
+        captured = await _wait_for(
+            lambda: any("MARKER_FROM_FIRST_PROCESS" in line for line in conn._stderr_tail),
+        )
+        assert captured, "first-process stderr marker never reached the drainer"
         # The next call triggers _ensure_alive's "returncode is not None"
         # branch, which must call _close_proc (resetting _stderr_tail)
         # before _spawn. The second-spawned agent writes nothing to stderr
         # (marker file already exists), so any marker still present in the
         # tail leaked from the dead first process.
         await conn.call("agent_info")
-        await asyncio.sleep(0.1)
+        # The cleanup is synchronous within _close_proc → _stderr_tail = []
+        # happens before _spawn returns, so the assertion holds without
+        # waiting. We still let one event-loop turn pass in case anything
+        # else was queued.
+        await asyncio.sleep(0)
         assert not any("MARKER_FROM_FIRST_PROCESS" in line for line in conn._stderr_tail)
 
 

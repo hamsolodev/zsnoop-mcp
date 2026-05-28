@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--agent-source /missing/path` would propagate `FileNotFoundError`
   out of `asyncio.run`, surfacing as a Python traceback. Now caught at
   the top level and printed as a clean one-line error with exit code 2.
+- **Agent's `_iso_to_ts` now treats naive ISO timestamps as UTC.**
+  `datetime.timestamp()` on a naive datetime interprets it as *local*
+  time, so the same ISO string would map to different epoch seconds
+  depending on the agent host's TZ — inconsistent with the server's
+  `timeparse`, which always assumes UTC. The server happens to always
+  send tz-aware strings today, so this is a defensive fix at the
+  boundary rather than a user-visible bug fix.
+- **Removed a flaky fixed-sleep from the respawn test.** The transport
+  respawn test used `await asyncio.sleep(0.1)` to wait for the stderr
+  drainer; on busy CI runners that's not always long enough. Replaced
+  with a polling `_wait_for(predicate)` helper that returns as soon as
+  the marker appears.
 
 - **Transport recv-timeout caused chained failures.** The 60 s default
   `recv_timeout` was shorter than the agent's `ZFS_DIFF_TIMEOUT_SECONDS`
