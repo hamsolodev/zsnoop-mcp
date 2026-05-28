@@ -8,6 +8,7 @@ when we need to avoid touching the host's real ZFS state.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import textwrap
 from pathlib import Path
@@ -189,6 +190,59 @@ async def test_reconnect_after_subprocess_dies(tmp_path: Path) -> None:
         # transparently and succeed (the new instance also serves one then dies).
         second = await conn.call("agent_info")
         assert second == {"served_by": "one_shot"}
+
+
+def _first_run_noisy_agent(tmp_path: Path) -> Path:
+    """Agent that prints a stderr marker only on its FIRST invocation
+    (uses a marker file). Responds once, then exits. The second invocation
+    (after respawn) prints nothing to stderr — so any marker left in the
+    transport's _stderr_tail must have leaked from the dead process.
+    """
+    marker = tmp_path / "first_run.flag"
+    script = tmp_path / "first_run_noisy.py"
+    script.write_text(
+        textwrap.dedent(f"""\
+            import json, os, sys
+            marker = {str(marker)!r}
+            if not os.path.exists(marker):
+                open(marker, "w").close()
+                sys.stderr.write("MARKER_FROM_FIRST_PROCESS\\n")
+                sys.stderr.flush()
+            line = sys.stdin.readline()
+            req = json.loads(line)
+            sys.stdout.write(json.dumps({{
+                "jsonrpc": "2.0", "id": req["id"],
+                "result": {{"ok": True}},
+            }}) + "\\n")
+            sys.stdout.flush()
+            sys.exit(0)
+        """),
+    )
+    return script
+
+
+async def test_respawn_resets_stderr_tail_after_natural_death(tmp_path: Path) -> None:
+    """When a subprocess dies naturally (returncode set, no _close_proc),
+    the respawn path must call _close_proc to reset _stderr_tail —
+    otherwise stale stderr lines from the dead process bleed into
+    subsequent error reports.
+    """
+    script = _first_run_noisy_agent(tmp_path)
+    argv = [sys.executable, str(script)]
+    async with AgentConnection("noisy", argv) as conn:
+        await conn.call("agent_info")
+        # Let the drainer capture the stderr marker before the process exits.
+        await asyncio.sleep(0.1)
+        # Sanity: the marker was in fact captured by the first drainer.
+        assert any("MARKER_FROM_FIRST_PROCESS" in line for line in conn._stderr_tail)
+        # The next call triggers _ensure_alive's "returncode is not None"
+        # branch, which must call _close_proc (resetting _stderr_tail)
+        # before _spawn. The second-spawned agent writes nothing to stderr
+        # (marker file already exists), so any marker still present in the
+        # tail leaked from the dead first process.
+        await conn.call("agent_info")
+        await asyncio.sleep(0.1)
+        assert not any("MARKER_FROM_FIRST_PROCESS" in line for line in conn._stderr_tail)
 
 
 def _always_dies_agent(tmp_path: Path) -> Path:

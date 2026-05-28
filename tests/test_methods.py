@@ -684,6 +684,26 @@ def test_content_grep_skips_binary_files_via_null_byte_sniff(
     assert "binary_no_newlines.bin" not in paths
 
 
+def test_get_dataset_mountpoint_is_cached_across_calls(fake_zfs: FakeZfs) -> None:
+    """Per-dataset mountpoint lookups are memoised so that snapshot-
+    iterating methods (file_history, versions_of, bisect_change, …)
+    don't spawn one `zfs get mountpoint` subprocess per snapshot."""
+    fake_zfs.add(
+        ["get", "-H", "-p", "-o", "value", "mountpoint", "rpool/home"],
+        "/mnt/home\n",
+    )
+    # First call hits the subprocess; subsequent calls hit the cache.
+    for _ in range(10):
+        mp = agent.get_dataset_mountpoint("rpool/home")
+        assert str(mp) == "/mnt/home"
+    # FakeZfs records every call it actually serviced — should be one.
+    mountpoint_calls = [c for c in fake_zfs.calls if c[0:1] == ("get",) and "mountpoint" in c]
+    assert len(mountpoint_calls) == 1, (
+        f"expected exactly one zfs get mountpoint call, got {len(mountpoint_calls)}: "
+        f"{mountpoint_calls}"
+    )
+
+
 def test_content_grep_caps_pathological_single_line_files(
     mock_mountpoint: dict[str, Any],
 ) -> None:
