@@ -14,7 +14,7 @@ import re
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from mcp.server.fastmcp import FastMCP
 
@@ -79,8 +79,33 @@ def _sftp_quote(path: str) -> str:
     string a single literal argument: spaces, glob metacharacters
     (``*?[``), semicolons, ``$()`` — all are taken verbatim, so this is
     both correct for unusual filenames and free of any injection surface.
+
+    Newline / carriage-return / NUL are the one thing double-quoting can't
+    contain: the batch script (``sftp -b -``) is line-oriented, so a raw
+    newline terminates the command line *inside* the quoted argument. We
+    refuse such paths outright (callers also reject them earlier) rather
+    than emit a batch line that sftp would mis-parse or — in the worst
+    case — read as an injected second command.
     """
+    _reject_batch_breaking_chars(path, label="path")
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# Characters that cannot appear in a path fed to the sftp batch script:
+# newline / carriage-return terminate the line-oriented batch command, and
+# NUL is illegal in a filesystem path. Rejecting them turns a fragile,
+# implicit defence (sftp aborting on the resulting parse error) into an
+# explicit one, and gives a clear error instead of "Unterminated quoted
+# argument". Such names are unfetchable via sftp regardless; use read_file
+# for inspection if you ever hit one.
+_BATCH_BREAKING_CHARS: Final = ("\n", "\r", "\0")
+
+
+def _reject_batch_breaking_chars(value: str, *, label: str) -> None:
+    if any(c in value for c in _BATCH_BREAKING_CHARS):
+        raise ValueError(
+            f"{label} may not contain newline, carriage-return, or NUL characters",
+        )
 
 
 def _validate_fetch_path(path: str) -> str:
@@ -90,6 +115,7 @@ def _validate_fetch_path(path: str) -> str:
     a leading ``/`` (callers may pass either form) and rejects ``..``
     components. Returns the normalised relative path string.
     """
+    _reject_batch_breaking_chars(path, label="path")
     stripped = path.lstrip("/")
     parts = Path(stripped).parts
     if ".." in parts:
@@ -104,6 +130,7 @@ def _validate_local_dest(local_path: str) -> Path:
     real directory. Existence semantics for the destination itself are left to
     the caller — ``fetch_file`` and ``fetch_dir`` have different requirements.
     """
+    _reject_batch_breaking_chars(local_path, label="local_path")
     expanded = Path(local_path).expanduser()
     if not expanded.is_absolute():
         raise ValueError(

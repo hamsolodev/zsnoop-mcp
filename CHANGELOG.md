@@ -25,6 +25,11 @@ fixed here. No API changes; agent version bumped to 0.3.1.
   sftp's own client-side lexer. sftp never invokes a remote shell, so
   this is correct for spaces / glob chars / shell metacharacters *and*
   has no injection surface — independent of the client's OpenSSH version.
+  Paths containing a newline, carriage-return, or NUL are rejected at the
+  boundary (`_validate_fetch_path` / `_validate_local_dest` / `_sftp_quote`):
+  the batch script is line-oriented, so those characters can't be contained
+  by quoting, and refusing them turns a fragile implicit defence into an
+  explicit one (thanks to the PR #16 review for flagging this).
 - **`diff_snapshots` and `find_deleted` returned ZFS-escaped paths.**
   `zfs diff` renders any byte outside printable ASCII as `\NNNN`
   (octal), so a file under `Tax 2026/` came back as `Tax\00402026/…` —
