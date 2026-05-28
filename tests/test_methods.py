@@ -397,6 +397,59 @@ def test_snapshot_cadence_reports_biggest_gap(fake_zfs: FakeZfs) -> None:
     assert result["biggest_gap_between"] == ["rpool/home@b", "rpool/home@c"]
 
 
+def test_snapshot_cadence_host_wide_omits_biggest_gap(fake_zfs: FakeZfs) -> None:
+    """Host-wide (dataset=None) the 'biggest gap' is meaningless across
+    unrelated datasets (and ambiguous when their auto-snapshots share
+    timestamps), so it must be null. Counts/span still populate."""
+    fake_zfs.add(
+        ["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,used,referenced"],
+        # Two datasets whose snapshots share identical creation instants —
+        # exactly the collision that made the old creation->name dict drop
+        # entries and the cross-dataset gap meaningless.
+        "rpool/a@daily-1\t100\t0\t0\n"
+        "rpool/b@daily-1\t100\t0\t0\n"
+        "rpool/a@daily-2\t9000\t0\t0\n"
+        "rpool/b@daily-2\t9000\t0\t0\n",
+    )
+    result = agent.m_snapshot_cadence({})
+    assert result["total_snapshots"] == 4
+    assert result["earliest_creation"] == 100
+    assert result["latest_creation"] == 9000
+    assert result["biggest_gap_seconds"] is None
+    assert result["biggest_gap_between"] is None
+
+
+def test_snapshot_cadence_gap_excludes_descendant_datasets(fake_zfs: FakeZfs) -> None:
+    """When scoped to a dataset, the gap is computed over that dataset's own
+    timeline only — descendant snapshots from the recursive listing (which
+    fire at the same instants) must not create spurious zero gaps or
+    misattributed boundary names."""
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "rpool/home",
+        ],
+        # Parent timeline: 100, 200, 1000 -> biggest gap 800 (b->c).
+        # Child snapshots interleave at identical timestamps.
+        "rpool/home@a\t100\t0\t0\n"
+        "rpool/home/child@a\t100\t0\t0\n"
+        "rpool/home@b\t200\t0\t0\n"
+        "rpool/home/child@b\t200\t0\t0\n"
+        "rpool/home@c\t1000\t0\t0\n"
+        "rpool/home/child@c\t1000\t0\t0\n",
+    )
+    result = agent.m_snapshot_cadence({"dataset": "rpool/home"})
+    assert result["biggest_gap_seconds"] == 800
+    assert result["biggest_gap_between"] == ["rpool/home@b", "rpool/home@c"]
+
+
 def test_snapshot_cadence_empty_dataset(fake_zfs: FakeZfs) -> None:
     fake_zfs.add(
         [
@@ -432,6 +485,35 @@ def test_diff_snapshots_parses_changes(fake_zfs: FakeZfs) -> None:
     assert ops == ["M", "+", "-", "R"]
     rename = next(c for c in result["changes"] if c["op"] == "R")
     assert rename["new_path"] == "/home/newname"
+
+
+def test_diff_snapshots_decodes_octal_escaped_paths(fake_zfs: FakeZfs) -> None:
+    """`zfs diff` escapes spaces (and other non-printable bytes) as \\NNNN.
+    The path we return must be the real on-disk path so it round-trips into
+    read_file / fetch_file. Reproduces the blaster `Tax 2026` field finding."""
+    fake_zfs.add(
+        ["diff", "-H", "-F", "rpool/home@a", "rpool/home@b"],
+        # space -> \0040; rename target also escaped.
+        "+\tF\t/home/mch/Sync/Tax\\00402026/inv.pdf\n"
+        "R\tF\t/home/old\\0040name\t/home/new\\0040name\n",
+    )
+    result = agent.m_diff_snapshots({"snap_a": "rpool/home@a", "snap_b": "rpool/home@b"})
+    added = next(c for c in result["changes"] if c["op"] == "+")
+    assert added["path"] == "/home/mch/Sync/Tax 2026/inv.pdf"
+    rename = next(c for c in result["changes"] if c["op"] == "R")
+    assert rename["path"] == "/home/old name"
+    assert rename["new_path"] == "/home/new name"
+
+
+def test_unescape_zfs_diff_path_reconstructs_utf8_multibyte() -> None:
+    """A multi-byte UTF-8 char is escaped byte-per-byte by zfs diff
+    (é = 0xC3 0xA9 -> \\0303\\0251); the decoder must reassemble the bytes
+    and UTF-8 decode, not emit two stray code points."""
+    assert agent._unescape_zfs_diff_path("caf\\0303\\0251") == "café"
+    # A literal backslash in a name is itself escaped as \0134.
+    assert agent._unescape_zfs_diff_path("a\\0134b") == "a\\b"
+    # No escapes -> unchanged.
+    assert agent._unescape_zfs_diff_path("/plain/path.txt") == "/plain/path.txt"
 
 
 def test_run_zfs_accepts_per_call_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -772,6 +854,38 @@ def test_file_history_reports_absence(mock_mountpoint: dict[str, Any], fake_zfs:
     _setup_history_fake(fake_zfs, mock_mountpoint)
     result = agent.m_file_history({"dataset": "testpool/test", "path": "does_not_exist"})
     assert result["versions"][0]["present"] is False
+
+
+def test_file_history_scopes_to_exact_dataset(
+    mock_mountpoint: dict[str, Any], fake_zfs: FakeZfs
+) -> None:
+    """file_history must drop child-dataset snapshots — a path resolved
+    relative to the parent's root can never exist in a child's snapshot, so
+    those entries would be pure present=False noise. Reproduces the blaster
+    finding where rpool/home/mch/transmission* flooded ~70% of the output."""
+    fake_zfs.add(
+        [
+            "list",
+            "-H",
+            "-p",
+            "-t",
+            "snapshot",
+            "-o",
+            "name,creation,used,referenced",
+            "-r",
+            "testpool/test",
+        ],
+        # Recursive listing includes the parent AND a child dataset.
+        f"{mock_mountpoint['snapshot_name']}\t1716000000\t10\t1000\n"
+        "testpool/test/child@snap1\t1716000001\t10\t1000\n",
+    )
+    result = agent.m_file_history({"dataset": "testpool/test", "path": "hello.txt"})
+    # Only the exact dataset's snapshot is walked; the child is excluded
+    # entirely (not even resolved, so no mountpoint lookup for it is needed).
+    datasets = {v["snapshot"].split("@")[0] for v in result["versions"]}
+    assert datasets == {"testpool/test"}
+    assert len(result["versions"]) == 1
+    assert result["versions"][0]["present"] is True
 
 
 def test_snapshots_containing_filters_by_time(

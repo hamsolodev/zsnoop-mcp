@@ -45,7 +45,7 @@ JsonId = str | int | float | None
 # Constants
 # ----------------------------------------------------------------------------
 
-AGENT_VERSION: Final = "0.3.0"
+AGENT_VERSION: Final = "0.3.1"
 PROTOCOL_VERSION: Final = "1"
 
 # Hard caps the agent will never exceed regardless of caller-provided values.
@@ -690,7 +690,11 @@ def m_snapshot_cadence(params: dict[str, Any]) -> dict[str, Any]:
     there gaps?" with a single structured response.
 
     If *dataset* is omitted, summarises every snapshot the agent can see
-    (i.e. across all datasets, treated as one population).
+    (i.e. across all datasets, treated as one population). Counts, byte
+    totals and the earliest/latest span are meaningful for that whole
+    population, but ``biggest_gap_*`` is a single-timeline concept and is
+    only computed when a *dataset* is given (see below); host-wide it is
+    ``null``.
     """
     dataset = params.get("dataset")
     if dataset is not None:
@@ -718,21 +722,28 @@ def m_snapshot_cadence(params: dict[str, Any]) -> dict[str, Any]:
                 "unique_bytes": sum(s["used"] or 0 for s in group),
             },
         )
-    # Overall: sorted creations across all snapshots.
+    # Overall span across the whole population (meaningful host-wide too).
     all_creations = sorted(s["creation"] for s in snaps if s["creation"] is not None)
+    # Biggest gap is the longest interval between consecutive snapshots of a
+    # *single* dataset's timeline. We only compute it when a dataset is
+    # given: host-wide (dataset=None) merges many datasets whose auto-
+    # snapshots fire at identical instants, so a cross-dataset "gap" is both
+    # meaningless and ambiguous. Even when scoped, exclude descendant
+    # datasets (the recursive `zfs list -r`) and carry the name alongside the
+    # creation time so colliding timestamps can't misattribute the boundary
+    # snapshots (a dict keyed on creation would collapse them).
     biggest_gap_seconds = None
     biggest_gap_between: list[str] | None = None
-    # Need at least two timestamps to define a gap between them.
-    if len(all_creations) >= 2:  # noqa: PLR2004
-        gaps = [(all_creations[i] - all_creations[i - 1], i) for i in range(1, len(all_creations))]
-        gap_seconds, gap_idx = max(gaps)
-        biggest_gap_seconds = gap_seconds
-        # Recover the snapshot names at the boundary.
-        creation_to_name = {s["creation"]: s["name"] for s in snaps if s["creation"] is not None}
-        biggest_gap_between = [
-            creation_to_name[all_creations[gap_idx - 1]],
-            creation_to_name[all_creations[gap_idx]],
-        ]
+    if dataset is not None:
+        own = sorted(
+            (s["creation"], s["name"])
+            for s in snaps
+            if s["creation"] is not None and s["dataset"] == dataset
+        )
+        if len(own) >= 2:  # noqa: PLR2004 - need two points to define a gap
+            gap_seconds, gap_idx = max((own[i][0] - own[i - 1][0], i) for i in range(1, len(own)))
+            biggest_gap_seconds = gap_seconds
+            biggest_gap_between = [own[gap_idx - 1][1], own[gap_idx][1]]
     return {
         "dataset": dataset,
         "total_snapshots": len(snaps),
@@ -743,6 +754,34 @@ def m_snapshot_cadence(params: dict[str, Any]) -> dict[str, Any]:
         "biggest_gap_between": biggest_gap_between,
         "total_unique_bytes": total_used,
     }
+
+
+_ZFS_DIFF_OCTAL_RE: Final = re.compile(r"\\([0-7]{4})")
+
+
+def _unescape_zfs_diff_path(raw: str) -> str:
+    """Decode the octal escaping ``zfs diff`` applies to its path columns.
+
+    ``zfs diff`` (libzfs ``stream_bytes``) renders any byte outside printable
+    ASCII — and the backslash itself — as ``\\NNNN``: a backslash followed by
+    the 4-digit zero-padded octal value of the byte. A filename with a space
+    comes back as ``Tax\\00402026``; a multi-byte UTF-8 character comes back
+    as one ``\\NNNN`` escape per byte. We reconstruct the original byte
+    sequence (literal ASCII runs verbatim, each ``\\NNNN`` as its octal byte)
+    and UTF-8 decode it, so the ``path`` we return is the *real* on-disk path
+    that ``read_file`` / ``fetch_file`` / ``file_diff`` can round-trip. The
+    field/record tab and newline separators are never ambiguous because
+    ``zfs diff`` escapes any tab/newline *within* a name (0x09 → ``\\0011``,
+    0x0a → ``\\0012``).
+    """
+    out = bytearray()
+    pos = 0
+    for m in _ZFS_DIFF_OCTAL_RE.finditer(raw):
+        out.extend(raw[pos : m.start()].encode("utf-8", "surrogateescape"))
+        out.append(int(m.group(1), 8))
+        pos = m.end()
+    out.extend(raw[pos:].encode("utf-8", "surrogateescape"))
+    return out.decode("utf-8", "surrogateescape")
 
 
 def m_diff_snapshots(params: dict[str, Any]) -> dict[str, Any]:
@@ -761,10 +800,11 @@ def m_diff_snapshots(params: dict[str, Any]) -> dict[str, Any]:
         parts = line.split("\t")
         if len(parts) < DIFF_MIN_FIELDS:
             continue
-        change, ftype, path = parts[0], parts[1], parts[2]
+        change, ftype = parts[0], parts[1]
+        path = _unescape_zfs_diff_path(parts[2])
         entry: dict[str, Any] = {"op": change, "type": ftype, "path": path}
         if change == "R" and len(parts) >= DIFF_RENAME_FIELDS:
-            entry["new_path"] = parts[3]
+            entry["new_path"] = _unescape_zfs_diff_path(parts[3])
         changes.append(entry)
     return {"snap_a": snap_a, "snap_b": snap_b, "changes": changes}
 
@@ -1445,7 +1485,16 @@ def m_file_history(params: dict[str, Any]) -> dict[str, Any]:
     dataset = validate_dataset(_require_str(params, "dataset"))
     path = _require_str(params, "path")
     rel = validate_user_path(path)
-    snaps = m_list_snapshots({"dataset": dataset})["snapshots"]
+    # `m_list_snapshots` is recursive (`zfs list -r`), so it also returns
+    # snapshots of *child* datasets, where a path resolved relative to the
+    # parent's root can never exist — they'd all report present=False and
+    # bloat the response (often the bulk of it on a host with nested
+    # datasets). Scope to snapshots of the exact dataset, matching what
+    # `m_bisect_change` already does. This also benefits every caller that
+    # delegates here: versions_of, snapshots_containing, first/last_appearance.
+    snaps = [
+        s for s in m_list_snapshots({"dataset": dataset})["snapshots"] if s["dataset"] == dataset
+    ]
     versions = []
     for snap_meta in snaps:
         snap_full = snap_meta["name"]

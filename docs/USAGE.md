@@ -34,19 +34,20 @@ LLM will:
    snapshot whose creation timestamp is closest to last Tuesday.
 2. Call `fetch_file(host="r2d2", snapshot="rpool/ROOT/debian@daily-2026-05-20",
    path="etc/nginx/nginx.conf", local_path="/tmp/nginx-recovery.conf")`.
-3. Report the local path and size. The file is copied via SCP directly from the
+3. Report the local path and size. The file is copied via SFTP directly from the
    `.zfs/snapshot/` mount point — no intermediate read through the MCP layer.
 
 `fetch_file` refuses to overwrite an existing path unless you pass
-`overwrite=True`. The parent directory must already exist.
+`overwrite=True`. The parent directory must already exist. Filenames with
+spaces or other special characters are handled correctly.
 
 > "Pull down the whole `/home/alice/.config` directory from the snapshot before
 > last weekend's upgrade, into `/tmp/alice-config-pre-upgrade`."
 
 `fetch_dir(host="r2d2", snapshot="rpool/home/alice@weekly-2026-05-17",
 path=".config", local_path="/tmp/alice-config-pre-upgrade")` copies the
-directory tree recursively (SCP `-r`). Useful when you need multiple files
-from the same snapshot and don't want to `fetch_file` them one by one.
+directory tree recursively (`sftp get -r`). Useful when you need multiple
+files from the same snapshot and don't want to `fetch_file` them one by one.
 
 > "Verify the file I just recovered matches the snapshot copy."
 
