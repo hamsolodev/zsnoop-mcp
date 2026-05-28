@@ -376,6 +376,59 @@ def test_sftp_quote_escapes_backslash_and_doublequote() -> None:
     assert srv_mod._sftp_quote("a\\b") == '"a\\\\b"'
 
 
+def test_sftp_quote_rejects_batch_breaking_chars() -> None:
+    """The sftp batch script is line-oriented, so a newline/CR/NUL in a path
+    can't be contained by double-quoting (it terminates the command line
+    inside the quotes). _sftp_quote refuses them rather than emit a line
+    sftp would mis-parse or read as an injected second command."""
+    for bad in ("a\nb", "a\rb", "a\0b"):
+        with pytest.raises(ValueError, match="newline, carriage-return, or NUL"):
+            srv_mod._sftp_quote(bad)
+
+
+@pytest.mark.parametrize("bad_char", ["\n", "\r", "\0"])
+async def test_fetch_file_rejects_newline_in_remote_path(
+    cfg: Config,
+    tmp_path: Path,
+    bad_char: str,
+) -> None:
+    """A remote path containing a batch-breaking char is refused at the
+    server boundary, before any sftp subprocess is spawned. Closes the
+    sftp-batch command-injection vector Copilot flagged on PR #16."""
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="newline, carriage-return, or NUL"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path=f"etc/app.conf{bad_char}rm -rf important",
+            local_path=str(tmp_path / "out.conf"),
+        )
+
+
+@pytest.mark.parametrize("bad_char", ["\n", "\r", "\0"])
+async def test_fetch_file_rejects_newline_in_local_path(
+    cfg: Config,
+    tmp_path: Path,
+    bad_char: str,
+) -> None:
+    """A local destination containing a batch-breaking char is likewise
+    refused — it is the second quoted argument in the sftp `get` line."""
+    pool = _make_fetch_pool("/data")
+    server = create_server(pool, cfg)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="newline, carriage-return, or NUL"):
+        await _tool_call(
+            server,
+            "fetch_file",
+            host="r2d2",
+            snapshot="rpool/data@daily-1",
+            path="etc/app.conf",
+            local_path=f"{tmp_path}/out{bad_char}rm.conf",
+        )
+
+
 async def test_fetch_file_sftp_quotes_path_with_metacharacters(
     cfg: Config,
     tmp_path: Path,
