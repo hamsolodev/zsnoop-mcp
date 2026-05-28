@@ -33,7 +33,7 @@ import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Final
 
@@ -1900,6 +1900,13 @@ def _iso_to_ts(value: object, *, name: str) -> int | None:
         dt = datetime.fromisoformat(value)
     except ValueError as e:
         raise InvalidParams(f"{name} is not a valid ISO 8601 timestamp: {e}") from e
+    # Match the server's `timeparse` convention: a naive ISO string is
+    # treated as UTC. Otherwise `dt.timestamp()` would interpret a naive
+    # datetime as *local* time, so the same input would map to different
+    # epoch seconds depending on the agent host's TZ — inconsistent with
+    # the server, where every datetime is already tz-aware (UTC).
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp())
 
 

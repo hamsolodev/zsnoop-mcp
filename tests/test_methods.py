@@ -684,6 +684,21 @@ def test_content_grep_skips_binary_files_via_null_byte_sniff(
     assert "binary_no_newlines.bin" not in paths
 
 
+def test_iso_to_ts_treats_naive_as_utc() -> None:
+    """A naive ISO 8601 string is interpreted as UTC, matching the server's
+    `timeparse.parse_phrase` convention. Without this, `datetime.timestamp()`
+    on a naive datetime would interpret it as *local* time, so the same
+    input would map to different epoch seconds depending on the agent
+    host's TZ. The server always sends timezone-aware strings today, but
+    the boundary should be self-consistent regardless."""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    expected = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp())
+    naive = agent._iso_to_ts("2024-01-01T00:00:00", name="t")
+    aware = agent._iso_to_ts("2024-01-01T00:00:00+00:00", name="t")
+    assert naive == aware == expected
+
+
 def test_get_dataset_mountpoint_is_cached_across_calls(fake_zfs: FakeZfs) -> None:
     """Per-dataset mountpoint lookups are memoised so that snapshot-
     iterating methods (file_history, versions_of, bisect_change, …)
