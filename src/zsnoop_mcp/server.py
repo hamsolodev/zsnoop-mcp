@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import shlex
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
@@ -23,10 +22,10 @@ from zsnoop_mcp.config import Config, ConfigError, HostConfig
 from zsnoop_mcp.timeparse import TimePhraseError, maybe_to_iso
 from zsnoop_mcp.transport import AgentRpcError, ConnectionPool, TransportError
 
-# SSH options forwarded to scp/cp for fetch operations. Mirrors the subset of
-# transport.DEFAULT_SSH_OPTIONS that are meaningful to scp (omits -T, which
+# SSH options forwarded to sftp for fetch operations. Mirrors the subset of
+# transport.DEFAULT_SSH_OPTIONS that are meaningful to sftp (omits -T, which
 # controls TTY allocation for interactive SSH, not file transfer).
-_SCP_SSH_OPTIONS: tuple[str, ...] = (
+_FETCH_SSH_OPTIONS: tuple[str, ...] = (
     "-o",
     "BatchMode=yes",
     "-o",
@@ -35,17 +34,18 @@ _SCP_SSH_OPTIONS: tuple[str, ...] = (
     "ServerAliveCountMax=3",
 )
 
-# Timeout for a single scp / cp fetch subprocess (seconds). Large files on
+# Timeout for a single sftp / cp fetch subprocess (seconds). Large files on
 # slow links may take longer; callers should document this limit.
 _FETCH_TIMEOUT_SECONDS: float = 300.0
 
 
-# Snapshot-name shape, used to validate strings before they reach the SCP
-# command builder for fetch_file / fetch_dir. Mirrors the agent's SNAPSHOT_RE
-# (kept duplicated rather than imported because the agent is a standalone
-# single-file script, not a package). Defence in depth: even though we
-# shell-quote the eventual remote path, refusing malformed names at the
-# server boundary fails fast with a clear error.
+# Snapshot-name shape, validated at the server boundary for fetch_file /
+# fetch_dir. Mirrors the agent's SNAPSHOT_RE (kept duplicated rather than
+# imported because the agent is a standalone single-file script, not a
+# package). The transport no longer uses a remote shell — sftp(1) speaks the
+# SFTP protocol and never word-splits or evaluates the remote path — so this
+# is defence in depth + a fast, clear error on malformed input rather than an
+# injection guard.
 _SNAPSHOT_NAME_RE: re.Pattern[str] = re.compile(
     r"^[A-Za-z0-9_][A-Za-z0-9_.:/-]*@[A-Za-z0-9_][A-Za-z0-9_.:-]*$",
 )
@@ -55,9 +55,8 @@ def _parse_snapshot_name(name: str) -> tuple[str, str]:
     """Split ``dataset@snapname`` into ``(dataset, snapname)``.
 
     Validates the full name against ZFS's restrictive snapshot-naming rules
-    before splitting, so a name containing shell metacharacters (semicolons,
-    backticks, ``$()``, spaces, etc.) is refused at the server boundary
-    rather than being silently passed into a downstream SCP source path.
+    before splitting, so a malformed name fails fast at the server boundary
+    with a clear error.
     """
     if "@" not in name:
         raise ValueError(f"invalid snapshot name (missing '@'): {name!r}")
@@ -69,6 +68,19 @@ def _parse_snapshot_name(name: str) -> tuple[str, str]:
         )
     dataset, snapname = name.split("@", 1)
     return dataset, snapname
+
+
+def _sftp_quote(path: str) -> str:
+    r"""Quote *path* for an sftp(1) batch command argument.
+
+    sftp parses its ``get`` arguments with its own lexer (``makeargv`` in
+    sftp.c), entirely client-side — there is no remote shell. Wrapping the
+    path in double quotes and escaping ``\`` and ``"`` makes the whole
+    string a single literal argument: spaces, glob metacharacters
+    (``*?[``), semicolons, ``$()`` — all are taken verbatim, so this is
+    both correct for unusual filenames and free of any injection surface.
+    """
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _validate_fetch_path(path: str) -> str:
@@ -108,22 +120,27 @@ def _validate_local_dest(local_path: str) -> Path:
     return dest
 
 
-async def _run_fetch(cmd: list[str]) -> None:
+async def _run_fetch(cmd: list[str], stdin_data: str | None = None) -> None:
     """Run *cmd* as a subprocess, raising ``RuntimeError`` on failure or timeout.
 
-    On timeout the child is SIGKILLed and reaped before we raise, so we never
-    leak a background ``scp``/``cp`` that keeps using the network and disk.
-    Stdin is wired to /dev/null so a misconfigured ``scp`` cannot block waiting
-    for interactive input despite ``BatchMode=yes``.
+    *stdin_data*, if given, is written to the child's stdin (used to feed an
+    sftp ``-b -`` batch script); otherwise stdin is /dev/null so a
+    misconfigured transfer can't block waiting for interactive input despite
+    ``BatchMode=yes``. On timeout the child is SIGKILLed and reaped before we
+    raise, so we never leak a background sftp/cp that keeps using the network.
     """
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdin=asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    input_bytes = stdin_data.encode("utf-8") if stdin_data is not None else None
     try:
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_FETCH_TIMEOUT_SECONDS)
+        _stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=input_bytes),
+            timeout=_FETCH_TIMEOUT_SECONDS,
+        )
     except TimeoutError as e:
         proc.kill()
         await proc.wait()
@@ -139,27 +156,38 @@ def _build_fetch_cmd(
     dest: Path,
     *,
     recursive: bool,
-) -> list[str]:
-    """Construct the scp (or cp for local transport) argv for a fetch.
+) -> tuple[list[str], str | None]:
+    """Build the ``(argv, stdin_data)`` for a fetch.
 
-    For the SSH transport the source argument uses scp's ``host:path`` form,
-    and the *path* portion is passed to a remote shell by scp. Shell-quote
-    it so a snapshot filename containing spaces, ``;``, ``$()``, backticks,
-    or other shell metacharacters can't be interpreted as commands on the
-    remote host. The local-transport ``cp`` invocation needs no quoting
-    because the path is passed as a direct argv element.
+    For the SSH transport we drive ``sftp`` in batch mode (``-b -``) and feed
+    a single ``get`` line on stdin. sftp speaks the SFTP protocol — it never
+    invokes a remote shell and never word-splits the remote path — so quoting
+    the path for sftp's own lexer (:func:`_sftp_quote`) is both injection-safe
+    and correct for filenames containing spaces or glob metacharacters. (The
+    earlier ``scp host:path`` form passed the path to a remote shell on the
+    legacy SCP protocol but is interpreted *literally* by scp's modern SFTP
+    backend, so shell-quoting it there silently broke any path with a space.)
+
+    For the local transport we ``cp`` directly; the argv carries the path as a
+    single element, so no quoting is needed and ``stdin_data`` is ``None``.
     """
     if host_config.transport == "local":
         cmd: list[str] = ["cp", "-a"]
         if recursive:
             cmd.append("-r")
         cmd.extend([remote_path, str(dest)])
-    else:
-        cmd = ["scp", *_SCP_SSH_OPTIONS, *host_config.ssh_options]
-        if recursive:
-            cmd.append("-r")
-        cmd.extend([f"{host_config.ssh_target}:{shlex.quote(remote_path)}", str(dest)])
-    return cmd
+        return cmd, None
+    get_line = "get -r " if recursive else "get "
+    batch = get_line + _sftp_quote(remote_path) + " " + _sftp_quote(str(dest)) + "\n"
+    cmd = [
+        "sftp",
+        *_FETCH_SSH_OPTIONS,
+        *host_config.ssh_options,
+        "-b",
+        "-",
+        host_config.ssh_target,
+    ]
+    return cmd, batch
 
 
 INSTRUCTIONS = (
@@ -691,11 +719,12 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
     ) -> dict[str, Any]:
         """Copy a single file from a ZFS snapshot to `local_path` on this machine.
 
-        Uses SCP (or a local ``cp`` for the local transport) — handles any
+        Uses SFTP (or a local ``cp`` for the local transport) — handles any
         file size and any encoding, unlike ``read_file`` which is capped at
         4 MiB and returns content through the LLM context. Use this for
         actual file recovery; use ``read_file`` for quick inspection of small
-        text files.
+        text files. Filenames with spaces or other special characters are
+        handled correctly.
 
         ``path`` is relative to the snapshot root (leading ``/`` is stripped).
         ``local_path`` is an absolute or ``~``-expanded path on this machine;
@@ -733,8 +762,8 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         if not mountpoint or mountpoint in ("-", "none", "legacy"):
             raise ValueError(f"dataset {dataset!r} has no usable mountpoint ({mountpoint!r})")
         remote_path = f"{mountpoint}/.zfs/snapshot/{snapname}/{fetch_path}"
-        cmd = _build_fetch_cmd(host_config, remote_path, dest, recursive=False)
-        await _run_fetch(cmd)
+        cmd, stdin_data = _build_fetch_cmd(host_config, remote_path, dest, recursive=False)
+        await _run_fetch(cmd, stdin_data)
         size = dest.stat().st_size
         return {
             "snapshot": snapshot,
@@ -753,14 +782,14 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
     ) -> dict[str, Any]:
         """Copy a directory subtree from a ZFS snapshot to `local_path` on this machine.
 
-        Recursively copies the entire subtree under `path` using SCP (or
+        Recursively copies the entire subtree under `path` using SFTP (or
         ``cp -ar`` for the local transport). Use this to restore a whole
         directory from a snapshot in one call.
 
         ``path`` is relative to the snapshot root (leading ``/`` is stripped).
         ``local_path`` is an absolute or ``~``-expanded path on this machine;
         its parent directory must already exist, and ``local_path`` itself
-        must NOT already exist — ``scp -r`` / ``cp -ar`` semantics for
+        must NOT already exist — ``sftp get -r`` / ``cp -ar`` semantics for
         existing destinations are ambiguous (some copy *into*, some
         *populate*), so the caller is required to clear it first.
 
@@ -789,8 +818,8 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         if not mountpoint or mountpoint in ("-", "none", "legacy"):
             raise ValueError(f"dataset {dataset!r} has no usable mountpoint ({mountpoint!r})")
         remote_path = f"{mountpoint}/.zfs/snapshot/{snapname}/{fetch_path}"
-        cmd = _build_fetch_cmd(host_config, remote_path, dest, recursive=True)
-        await _run_fetch(cmd)
+        cmd, stdin_data = _build_fetch_cmd(host_config, remote_path, dest, recursive=True)
+        await _run_fetch(cmd, stdin_data)
         return {
             "snapshot": snapshot,
             "path": path,

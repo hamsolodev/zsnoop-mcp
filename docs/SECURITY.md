@@ -69,6 +69,17 @@ elements are validated *before* the call:
 The local transport also uses an argv list for `ssh`, with the remote shell
 command produced via `shlex.quote()` per token.
 
+`fetch_file` / `fetch_dir` copy snapshot data with `sftp` in batch mode
+(`sftp -b -`), feeding a single `get` line whose paths are quoted for sftp's
+own client-side lexer (`_sftp_quote`). sftp speaks the SFTP protocol and
+never invokes a remote shell or word-splits the remote path, so snapshot
+filenames containing spaces, glob characters, or shell metacharacters are
+transferred verbatim with no injection surface. (Earlier releases shelled
+out to `scp host:path`; that form relied on a remote shell under the legacy
+SCP protocol but is interpreted literally by scp's modern SFTP backend, so
+the prior `shlex.quote()` of the path broke any filename with a space — see
+CHANGELOG 0.3.1.)
+
 ### G3 — Path inputs cannot escape their snapshot root
 
 For any operation that takes a `(snapshot, path)`, the agent

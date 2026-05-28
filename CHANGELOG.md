@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-28
+
+Field-testing every tool against a live pool surfaced four issues, all
+fixed here. No API changes; agent version bumped to 0.3.1.
+
+### Fixed
+
+- **`fetch_file` / `fetch_dir` failed on any path containing a space or
+  other special character** — a regression from the 0.3.0 shell-quoting
+  fix. That fix wrapped the remote path in `shlex.quote()`, which is
+  correct only when `scp` shells out under the legacy SCP protocol;
+  modern `scp` (OpenSSH ≥ 9.0) uses the SFTP backend and treats the path
+  *literally*, so the added quotes became part of the filename and the
+  transfer failed with "No such file or directory". The fetch transport
+  now drives `sftp` in batch mode (`sftp -b -`) with the path quoted for
+  sftp's own client-side lexer. sftp never invokes a remote shell, so
+  this is correct for spaces / glob chars / shell metacharacters *and*
+  has no injection surface — independent of the client's OpenSSH version.
+- **`diff_snapshots` and `find_deleted` returned ZFS-escaped paths.**
+  `zfs diff` renders any byte outside printable ASCII as `\NNNN`
+  (octal), so a file under `Tax 2026/` came back as `Tax\00402026/…` —
+  which then failed to round-trip into `read_file` / `fetch_file`. The
+  agent now decodes the escaping (reconstructing multi-byte UTF-8
+  correctly) so the returned `path` is the real on-disk path.
+- **`file_history` flooded its response with child-dataset noise.** It
+  walked the recursive snapshot list, so on a dataset with children every
+  child snapshot appeared as a `present: false` entry (the bulk of the
+  output on nested layouts). It now scopes to the exact dataset, matching
+  `bisect_change`. This also speeds up `versions_of`,
+  `snapshots_containing`, and `first`/`last_appearance`, which delegate to
+  it.
+- **`snapshot_cadence` reported a meaningless host-wide "biggest gap".**
+  With `dataset` omitted the gap was computed across the merged timelines
+  of unrelated datasets, and the boundary-snapshot names were unreliable
+  when datasets shared snapshot timestamps (the common auto-snapshot
+  case). `biggest_gap_*` is now computed only for a named dataset's own
+  timeline (excluding descendants, carrying names alongside timestamps to
+  avoid collisions) and is `null` host-wide.
+
 ## [0.3.0] — 2026-05-28
 
 ### Security
@@ -295,7 +334,8 @@ Initial public release.
 - PII scrubbed from example values throughout the repo and from git
   history.
 
-[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.2.0
 [0.1.2]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.1.2

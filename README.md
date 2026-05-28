@@ -117,8 +117,8 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `stale_snapshots`      | Snapshots older than a time phrase, sorted by uniqueness |
 | `size_delta`           | Bytes written between two snapshots of one dataset       |
 | `checksum_file`        | Full-file SHA-256 (256 MiB cap) for integrity checks     |
-| `fetch_file`           | Copy a snapshot file to a local path via SCP             |
-| `fetch_dir`            | Copy a snapshot directory tree to a local path via SCP   |
+| `fetch_file`           | Copy a snapshot file to a local path via SFTP            |
+| `fetch_dir`            | Copy a snapshot directory tree to a local path via SFTP  |
 
 Time-range parameters accept ISO 8601 *or* human phrases — `yesterday`,
 `last week`, `3 days ago`, `2 hours ago`, etc. Parsing happens locally; the

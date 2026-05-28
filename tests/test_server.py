@@ -8,7 +8,7 @@ stays hermetic. The goal is to assert that the server:
 - parses time phrases into ISO 8601 before forwarding,
 - maps AgentRpcError to ValueError and TransportError to RuntimeError,
 - injects queried_at into every _call() result,
-- fetch_file / fetch_dir build the correct scp command.
+- fetch_file / fetch_dir build the correct sftp batch command.
 
 We don't spin up FastMCP's stdio loop here; we exercise the registered
 tool callables directly via FastMCP's introspection helpers.
@@ -346,9 +346,10 @@ async def test_fetch_file_rejects_snapshot_name_with_shell_metas(
     cfg: Config,
     tmp_path: Path,
 ) -> None:
-    """Server boundary refuses snapshot names that don't match ZFS naming —
-    defence-in-depth against shell injection via the SCP source path even
-    though the eventual path is also shell-quoted."""
+    """Server boundary refuses snapshot names that don't match ZFS naming.
+    With the sftp batch transport there's no remote shell to inject into,
+    so this is defence-in-depth + a fast, clear error on malformed input
+    rather than an injection guard."""
     pool = _make_fetch_pool("/data")
     server = create_server(pool, cfg)  # type: ignore[arg-type]
 
@@ -363,49 +364,62 @@ async def test_fetch_file_rejects_snapshot_name_with_shell_metas(
         )
 
 
-async def test_fetch_file_shell_quotes_path_with_metacharacters(
+def test_sftp_quote_escapes_backslash_and_doublequote() -> None:
+    """_sftp_quote wraps in double quotes and escapes only ``\\`` and ``"``;
+    everything else (spaces, $, ;, glob chars, single quotes) is literal
+    inside the quotes, which is exactly what sftp's lexer wants."""
+    assert srv_mod._sftp_quote("plain.txt") == '"plain.txt"'
+    assert srv_mod._sftp_quote("with space.txt") == '"with space.txt"'
+    assert srv_mod._sftp_quote("a$(b);*?[c]'q") == '"a$(b);*?[c]\'q"'
+    # Backslash and double-quote are the two chars that must be escaped.
+    assert srv_mod._sftp_quote('a"b') == '"a\\"b"'
+    assert srv_mod._sftp_quote("a\\b") == '"a\\\\b"'
+
+
+async def test_fetch_file_sftp_quotes_path_with_metacharacters(
     cfg: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A snapshot file with shell-special characters in its path must be
-    shell-quoted before being passed to scp, so the remote shell can't
-    interpret them as commands. Snapshot names go through the regex
-    check, but filenames legitimately contain spaces / dollars / etc."""
+    """A snapshot file whose name contains spaces or shell/glob
+    metacharacters must reach sftp as a single double-quoted batch
+    argument. sftp's lexer takes it literally and never invokes a remote
+    shell, so the characters can't be word-split or interpreted — this is
+    both injection-safe and correct for unusual filenames. Regresses the
+    v0.3.0 ``shlex.quote`` approach, which broke any path with a space
+    under scp's modern SFTP backend."""
     pool = _make_fetch_pool("/data")
     server = create_server(pool, cfg)  # type: ignore[arg-type]
 
-    captured: list[list[str]] = []
+    dest = tmp_path / "out.conf"
+    captured: list[tuple[list[str], str | None]] = []
 
-    async def fake_run_fetch(cmd: list[str]) -> None:
-        captured.append(cmd)
-        await asyncio.to_thread(Path(cmd[-1]).write_bytes, b"x")
+    async def fake_run_fetch(cmd: list[str], stdin_data: str | None = None) -> None:
+        captured.append((cmd, stdin_data))
+        await asyncio.to_thread(dest.write_bytes, b"x")
 
     monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
 
-    dest = tmp_path / "out.conf"
     await _tool_call(
         server,
         "fetch_file",
         host="r2d2",
         snapshot="rpool/data@daily-1",
-        # Legitimate filename containing shell metacharacters.
-        path="etc/$(whoami)' file;.conf",
+        # Legitimate filename containing shell + glob metacharacters.
+        path="etc/$(whoami)' file;*.conf",
         local_path=str(dest),
     )
 
-    cmd = captured[0]
-    source = next(arg for arg in cmd if arg.startswith("r2d2.lan:"))
-    # The path portion after `host:` must be single-quoted (shlex.quote
-    # form) so the remote shell sees literal metacharacters, not a
-    # subshell / command separator.
-    path_portion = source.split(":", 1)[1]
-    assert path_portion.startswith("'")
-    assert path_portion.endswith("'")
-    assert "$(whoami)" in path_portion  # the literal text, inside the quotes
+    cmd, batch = captured[0]
+    assert cmd[0] == "sftp"
+    assert batch is not None
+    # The remote path is wrapped in double quotes with the metacharacters
+    # intact (literal). No backslash-escaping needed for these chars, and
+    # crucially no single-quote/shell-quote form.
+    assert batch == (f'get "/data/.zfs/snapshot/daily-1/etc/$(whoami)\' file;*.conf" "{dest}"\n')
 
 
-async def test_fetch_file_builds_scp_command(
+async def test_fetch_file_builds_sftp_command(
     cfg: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -413,16 +427,16 @@ async def test_fetch_file_builds_scp_command(
     pool = _make_fetch_pool("/data")
     server = create_server(pool, cfg)  # type: ignore[arg-type]
 
-    captured: list[list[str]] = []
+    dest = tmp_path / "recovered.conf"
+    captured: list[tuple[list[str], str | None]] = []
 
-    async def fake_run_fetch(cmd: list[str]) -> None:
-        captured.append(cmd)
+    async def fake_run_fetch(cmd: list[str], stdin_data: str | None = None) -> None:
+        captured.append((cmd, stdin_data))
         # Write via thread to satisfy the no-sync-IO-in-async-context rule.
-        await asyncio.to_thread(Path(cmd[-1]).write_bytes, b"fake content")
+        await asyncio.to_thread(dest.write_bytes, b"fake content")
 
     monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
 
-    dest = tmp_path / "recovered.conf"
     result = await _tool_call(
         server,
         "fetch_file",
@@ -433,10 +447,12 @@ async def test_fetch_file_builds_scp_command(
     )
 
     assert len(captured) == 1
-    cmd = captured[0]
-    assert cmd[0] == "scp"
-    assert "r2d2.lan:/data/.zfs/snapshot/daily-1/etc/app.conf" in cmd
-    assert str(dest) == cmd[-1]
+    cmd, batch = captured[0]
+    assert cmd[0] == "sftp"
+    assert "-b" in cmd
+    assert cmd[cmd.index("-b") + 1] == "-"  # batch read from stdin
+    assert cmd[-1] == "r2d2.lan"  # host is the final argv element
+    assert batch == f'get "/data/.zfs/snapshot/daily-1/etc/app.conf" "{dest}"\n'
     assert result["local_path"] == str(dest)
     assert result["size_bytes"] == len(b"fake content")
     assert "queried_at" in result
@@ -548,7 +564,7 @@ async def test_fetch_file_rejects_directory_destination(
     dest_dir = tmp_path / "existing_dir"
     dest_dir.mkdir()
 
-    # Even with overwrite=True, a directory destination is refused — scp/cp
+    # Even with overwrite=True, a directory destination is refused — sftp/cp
     # would copy *into* the directory, breaking the returned local_path.
     with pytest.raises(ValueError, match="destination is a directory"):
         await _tool_call(
@@ -562,7 +578,7 @@ async def test_fetch_file_rejects_directory_destination(
         )
 
 
-async def test_fetch_dir_builds_scp_recursive_command(
+async def test_fetch_dir_builds_sftp_recursive_command(
     cfg: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -570,10 +586,10 @@ async def test_fetch_dir_builds_scp_recursive_command(
     pool = _make_fetch_pool("/data")
     server = create_server(pool, cfg)  # type: ignore[arg-type]
 
-    captured: list[list[str]] = []
+    captured: list[tuple[list[str], str | None]] = []
 
-    async def fake_run_fetch(cmd: list[str]) -> None:
-        captured.append(cmd)
+    async def fake_run_fetch(cmd: list[str], stdin_data: str | None = None) -> None:
+        captured.append((cmd, stdin_data))
 
     monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
 
@@ -588,11 +604,11 @@ async def test_fetch_dir_builds_scp_recursive_command(
     )
 
     assert len(captured) == 1
-    cmd = captured[0]
-    assert cmd[0] == "scp"
-    assert "-r" in cmd
-    assert "r2d2.lan:/data/.zfs/snapshot/daily-1/home/alice" in cmd
-    assert str(dest) == cmd[-1]
+    cmd, batch = captured[0]
+    assert cmd[0] == "sftp"
+    assert cmd[-1] == "r2d2.lan"
+    # Recursive get (`get -r`) with both paths double-quoted for sftp.
+    assert batch == f'get -r "/data/.zfs/snapshot/daily-1/home/alice" "{dest}"\n'
     assert result["local_path"] == str(dest)
     assert "queried_at" in result
 
@@ -644,10 +660,11 @@ async def test_fetch_file_local_transport_uses_cp(
     pool = _make_fetch_pool(str(tmp_path / "zfs_mount"))
     server = create_server(pool, local_cfg)  # type: ignore[arg-type]
 
-    captured: list[list[str]] = []
+    captured: list[tuple[list[str], str | None]] = []
 
-    async def fake_run_fetch(cmd: list[str]) -> None:
-        captured.append(cmd)
+    async def fake_run_fetch(cmd: list[str], stdin_data: str | None = None) -> None:
+        captured.append((cmd, stdin_data))
+        # Local transport uses cp, whose dest is the final argv element.
         await asyncio.to_thread(Path(cmd[-1]).write_bytes, b"x")
 
     monkeypatch.setattr(srv_mod, "_run_fetch", fake_run_fetch)
@@ -661,5 +678,8 @@ async def test_fetch_file_local_transport_uses_cp(
         path="etc/foo",
         local_path=str(dest),
     )
-    assert captured[0][0] == "cp"
-    assert "-r" not in captured[0]
+    cmd, batch = captured[0]
+    assert cmd[0] == "cp"
+    assert "-r" not in cmd
+    assert cmd[-1] == str(dest)
+    assert batch is None  # local cp carries no stdin batch
