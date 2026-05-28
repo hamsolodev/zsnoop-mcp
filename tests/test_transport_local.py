@@ -38,7 +38,7 @@ def _agent_argv() -> list[str]:
 async def test_agent_info_round_trip() -> None:
     async with AgentConnection("local", _agent_argv()) as conn:
         result = await conn.call("agent_info")
-    assert result["agent_version"] == "0.2.0"
+    assert result["agent_version"] == "0.3.0"
     assert "list_snapshots" in result["methods"]
     assert result["limits"]["max_read_bytes"] > 0
 
@@ -362,7 +362,7 @@ async def test_agent_survives_non_serialisable_handler_result(tmp_path: Path) ->
             await conn.call("bad")
         # Subsequent calls still work against the same subprocess.
         result = await conn.call("agent_info")
-        assert result["agent_version"] == "0.2.0"
+        assert result["agent_version"] == "0.3.0"
 
 
 async def test_recv_timeout_tears_down_subprocess(tmp_path: Path) -> None:
@@ -411,7 +411,7 @@ async def test_call_after_close_respawns() -> None:
     await conn.call("agent_info")
     await conn.close()
     result = await conn.call("agent_info")
-    assert result["agent_version"] == "0.2.0"
+    assert result["agent_version"] == "0.3.0"
     await conn.close()
 
 

@@ -45,7 +45,7 @@ JsonId = str | int | float | None
 # Constants
 # ----------------------------------------------------------------------------
 
-AGENT_VERSION: Final = "0.2.0"
+AGENT_VERSION: Final = "0.3.0"
 PROTOCOL_VERSION: Final = "1"
 
 # Hard caps the agent will never exceed regardless of caller-provided values.
