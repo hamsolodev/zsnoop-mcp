@@ -104,6 +104,12 @@ def main() -> int:
     except ConfigError as e:
         print(f"configuration error: {e}", file=sys.stderr)
         return 2
+    except FileNotFoundError as e:
+        # Raised by find_agent_source() (broken install) or by
+        # --agent-source pointing at a missing file. Surfaces as a clean
+        # message instead of a Python traceback.
+        print(f"zsnoop-mcp: {e}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
     return 0

@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import difflib
 import fnmatch
+import functools
 import hashlib
 import heapq
 import json
@@ -220,8 +221,19 @@ def validate_positive_int(value: object, *, name: str, default: int, hard_max: i
 # ----------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=128)
 def get_dataset_mountpoint(dataset: str) -> Path:
-    """Return the live mountpoint of *dataset*."""
+    """Return the live mountpoint of *dataset*.
+
+    Result is cached for the agent's lifetime. Mountpoints rarely change
+    at runtime, and methods that iterate snapshots (``file_history``,
+    ``versions_of``, ``bisect_change``, ``snapshots_containing``, …) all
+    share the same mountpoint per dataset — without this cache, a dataset
+    with 1000 snapshots paid 1000 ``zfs get mountpoint`` subprocess calls
+    per history operation. If an operator runs ``zfs set mountpoint=…``
+    while the agent is running, restart the agent to pick up the change
+    (or call ``get_dataset_mountpoint.cache_clear()`` from a test).
+    """
     out = run_zfs(["get", "-H", "-p", "-o", "value", "mountpoint", dataset])
     mp = out.strip()
     if mp in ("", "-", "none", "legacy"):

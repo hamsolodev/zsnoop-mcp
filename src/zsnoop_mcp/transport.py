@@ -251,7 +251,15 @@ class AgentConnection:
         return result
 
     async def _ensure_alive(self) -> None:
-        if self._proc is None or self._proc.returncode is not None:
+        if self._proc is None:
+            await self._spawn()
+        elif self._proc.returncode is not None:
+            # Subprocess died naturally (not via _close_proc). Run the
+            # cleanup path before respawning so we cancel the old stderr
+            # drainer and reset the stderr tail — otherwise old lines
+            # from the dead process would bleed into the new connection's
+            # error reports.
+            await self._close_proc()
             await self._spawn()
 
     async def _spawn(self) -> None:

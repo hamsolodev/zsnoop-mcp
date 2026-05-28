@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   containing metacharacters can no longer reach the remote shell
   unescaped. Restores conformance with SECURITY.md G2.
 
+### Performance
+
+- **`get_dataset_mountpoint` is now memoised** (`functools.lru_cache`).
+  Methods that iterate snapshots of a dataset (`file_history`,
+  `versions_of`, `bisect_change`, `snapshots_containing`,
+  `first_appearance`, `last_appearance`) called
+  `snapshot_root` → `get_dataset_mountpoint` → `zfs get mountpoint` on
+  *every* iteration, when the mountpoint of a dataset is fixed across
+  all its snapshots. On a dataset with 1000 snapshots, one history
+  operation was spending an extra ~50 s in redundant subprocess calls.
+  Restart the agent (or call `get_dataset_mountpoint.cache_clear()`) to
+  pick up an operator's `zfs set mountpoint=…` change.
+
 ### Fixed
 
 - **Agent no longer crashes on a non-JSON-serialisable handler result.**
@@ -48,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`today` / `yesterday` docstring corrected.** The docstring claimed
   "local time" but the implementation uses UTC midnight (consistent with
   ZFS's UTC `creation` timestamps). Docs now match.
+- **Transport respawn now cleanly resets stderr state.** When a
+  subprocess died naturally (returncode set, no `_close_proc` called),
+  `_ensure_alive` jumped straight to `_spawn` without cancelling the
+  old stderr drainer or resetting `_stderr_tail`. Lines captured from
+  the dead process would then bleed into the next connection's error
+  reports. Now the dead-but-not-closed branch runs `_close_proc()`
+  first.
+- **`zsnoop-mcp` CLI no longer leaks a traceback for `FileNotFoundError`.**
+  A broken install (agent script missing from the wheel) or an explicit
+  `--agent-source /missing/path` would propagate `FileNotFoundError`
+  out of `asyncio.run`, surfacing as a Python traceback. Now caught at
+  the top level and printed as a clean one-line error with exit code 2.
 
 - **Transport recv-timeout caused chained failures.** The 60 s default
   `recv_timeout` was shorter than the agent's `ZFS_DIFF_TIMEOUT_SECONDS`

@@ -37,6 +37,18 @@ class FakeZfs:
             raise agent.ZfsError(f"unexpected zfs call: {args!r}") from e
 
 
+@pytest.fixture(autouse=True)
+def _reset_mountpoint_cache() -> None:
+    """Clear the in-process mountpoint LRU between tests.
+
+    The agent caches ``get_dataset_mountpoint`` for its lifetime — fine in
+    production (mountpoints rarely change at runtime), but in the test
+    suite different tests register different responses for the same
+    dataset and would see stale cached values without this reset.
+    """
+    agent.get_dataset_mountpoint.cache_clear()
+
+
 @pytest.fixture
 def fake_zfs(monkeypatch: pytest.MonkeyPatch) -> FakeZfs:
     """Replace ``agent.run_zfs`` with a :class:`FakeZfs` instance."""
