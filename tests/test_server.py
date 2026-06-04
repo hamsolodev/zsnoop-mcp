@@ -888,68 +888,30 @@ async def test_restore_file_rejects_target_with_batch_breaking_chars(
         )
 
 
-async def test_restore_file_rejects_existing_target_without_overwrite(
-    fake_pool: FakePool,
-    tmp_path: Path,
-) -> None:
-    existing = tmp_path / "already-there.conf"
-    existing.write_text("don't clobber me")
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="target_path already exists"):
-        await _tool_call(
-            server,
-            "restore_file",
-            host="bork",
-            snapshot="rpool@s1",
-            snapshot_path="etc/foo",
-            target_path=str(existing),
-        )
-    assert fake_pool.calls == []
-
-
-async def test_restore_file_refuses_directory_destination_even_with_overwrite(
-    fake_pool: FakePool,
-    tmp_path: Path,
-) -> None:
-    """A directory at target_path is refused unconditionally for
-    restore_file — restoring a *file* on top of a directory is almost
-    always a typo. Use restore_dir if you meant a tree."""
-    existing_dir = tmp_path / "a-directory"
-    existing_dir.mkdir()
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="is a directory"):
-        await _tool_call(
-            server,
-            "restore_file",
-            host="bork",
-            snapshot="rpool@s1",
-            snapshot_path="etc/foo",
-            target_path=str(existing_dir),
-            overwrite=True,
-        )
-
-
-async def test_restore_file_forwards_validated_params_to_agent(
+async def test_restore_file_forwards_intent_flags_to_agent(
     fake_pool: FakePool,
     tmp_path: Path,
 ) -> None:
     """Happy-path forwarding: the server-validated params reach the agent
-    intact, with backup_path=null when not overwriting."""
+    intact. The server forwards intent flags (overwrite / backup) ONLY —
+    existence checks and backup-path timestamp computation live on the
+    agent, since target_path is a *remote* path the server's local
+    filesystem can't authoritatively answer about. (PR #17 review.)"""
     fake_pool.next_result = {
         "snapshot": "rpool@s1",
         "snapshot_path": "etc/app.conf",
-        "target_path": str(tmp_path / "app.conf"),
+        "target_path": "/srv/app.conf",
         "size_bytes": 42,
         "backup_path": None,
     }
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    server = create_server(fake_pool, _restore_cfg())  # type: ignore[arg-type]
     result = await _tool_call(
         server,
         "restore_file",
         host="bork",
         snapshot="rpool@s1",
         snapshot_path="etc/app.conf",
-        target_path=str(tmp_path / "app.conf"),
+        target_path="/srv/app.conf",
     )
     assert len(fake_pool.calls) == 1
     host, method, params = fake_pool.calls[0]
@@ -958,76 +920,75 @@ async def test_restore_file_forwards_validated_params_to_agent(
     assert params == {
         "snapshot": "rpool@s1",
         "snapshot_path": "etc/app.conf",
-        "target_path": str(tmp_path / "app.conf"),
+        "target_path": "/srv/app.conf",
         "overwrite": False,
-        "backup_path": None,
+        "backup": False,
     }
     assert "queried_at" in result  # injected by _call
 
 
-async def test_restore_file_computes_backup_path_when_overwrite_and_backup(
+async def test_restore_file_forwards_overwrite_and_backup_flags(
     fake_pool: FakePool,
-    tmp_path: Path,
 ) -> None:
-    """With overwrite=True + backup=True + an existing target, the server
-    computes the timestamped backup_path and passes it to the agent for
-    atomic-rename-before-replace."""
-    existing = tmp_path / "to-replace.conf"
-    existing.write_text("old")
+    """overwrite=True + backup=True are forwarded as boolean flags, not
+    pre-computed backup_path. The agent is the only side that knows whether
+    the remote target exists and the only side that should mint the
+    backup_path's timestamp."""
     fake_pool.next_result = {
         "snapshot": "rpool@s1",
         "snapshot_path": "etc/x",
-        "target_path": str(existing),
+        "target_path": "/srv/x",
         "size_bytes": 7,
-        "backup_path": f"{existing}.zsnoop-backup-PLACEHOLDER",
+        "backup_path": "/srv/x.zsnoop-backup-2026-06-04T13:00:00+00:00",
     }
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    server = create_server(fake_pool, _restore_cfg())  # type: ignore[arg-type]
     await _tool_call(
         server,
         "restore_file",
         host="bork",
         snapshot="rpool@s1",
         snapshot_path="etc/x",
-        target_path=str(existing),
+        target_path="/srv/x",
         overwrite=True,
         backup=True,
     )
     _h, _m, params = fake_pool.calls[0]
     assert params is not None
     assert params["overwrite"] is True
-    assert params["backup_path"] is not None
-    assert params["backup_path"].startswith(f"{existing}.zsnoop-backup-")
-    # ISO 8601 timestamp suffix — verify it round-trips.
-    suffix = params["backup_path"].split(".zsnoop-backup-", 1)[1]
-    assert datetime.fromisoformat(suffix).tzinfo is not None
+    assert params["backup"] is True
+    assert "backup_path" not in params  # NOT computed server-side anymore
 
 
-async def test_restore_file_backup_ignored_when_target_absent(
+async def test_restore_file_canonicalises_via_posixpath_not_local_resolve(
     fake_pool: FakePool,
-    tmp_path: Path,
 ) -> None:
-    """backup=True with a non-existent target is a no-op (nothing to back
-    up). The agent gets backup_path=null."""
+    """Canonicalisation must be pure-string (posixpath.normpath), NOT
+    Path.resolve — target_path is a remote path, so resolving it through
+    the server's local filesystem can either follow an unrelated local
+    symlink (rejecting a legitimate restore) or miss a remote symlink
+    escape. With a remote-only allowlist of /srv/, the resolved canonical
+    `/srv/foo` should match and forward — regardless of what the
+    operator's workstation does or doesn't have at /srv/."""
     fake_pool.next_result = {
         "snapshot": "rpool@s1",
         "snapshot_path": "etc/x",
-        "target_path": str(tmp_path / "new.conf"),
-        "size_bytes": 7,
+        "target_path": "/srv/foo",
+        "size_bytes": 1,
         "backup_path": None,
     }
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    server = create_server(fake_pool, _restore_cfg(("/srv/",)))  # type: ignore[arg-type]
     await _tool_call(
         server,
         "restore_file",
         host="bork",
         snapshot="rpool@s1",
         snapshot_path="etc/x",
-        target_path=str(tmp_path / "new.conf"),
-        backup=True,  # ignored: no existing target
+        target_path="/srv/./sub/../foo",  # has `.` and `..` segments
     )
     _h, _m, params = fake_pool.calls[0]
     assert params is not None
-    assert params["backup_path"] is None
+    # Pure-string normpath collapses .. and . — no FS access required.
+    assert params["target_path"] == "/srv/foo"
 
 
 async def test_restore_dir_rejects_when_allow_restore_disabled(
@@ -1046,53 +1007,35 @@ async def test_restore_dir_rejects_when_allow_restore_disabled(
         )
 
 
-async def test_restore_dir_refuses_file_destination_with_overwrite(
+async def test_restore_dir_forwards_intent_flags_to_agent(
     fake_pool: FakePool,
-    tmp_path: Path,
 ) -> None:
-    """Replacing a file with a directory tree is almost always a typo —
-    rejected even with overwrite=True. Use restore_file if you meant a
-    single file."""
-    existing_file = tmp_path / "is-a-file.txt"
-    existing_file.write_text("not a directory")
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="restore_dir replaces a directory"):
-        await _tool_call(
-            server,
-            "restore_dir",
-            host="bork",
-            snapshot="rpool@s1",
-            snapshot_path="etc",
-            target_path=str(existing_file),
-            overwrite=True,
-        )
-
-
-async def test_restore_dir_forwards_validated_params_to_agent(
-    fake_pool: FakePool,
-    tmp_path: Path,
-) -> None:
+    """Same forwarding semantics as restore_file — intent flags only, no
+    existence/backup-path computation server-side. The agent owns the
+    remote filesystem decision."""
     fake_pool.next_result = {
         "snapshot": "rpool@s1",
         "snapshot_path": "etc",
-        "target_path": str(tmp_path / "etc-restore"),
+        "target_path": "/srv/etc-restore",
         "backup_path": None,
     }
-    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    server = create_server(fake_pool, _restore_cfg())  # type: ignore[arg-type]
     await _tool_call(
         server,
         "restore_dir",
         host="bork",
         snapshot="rpool@s1",
         snapshot_path="etc",
-        target_path=str(tmp_path / "etc-restore"),
+        target_path="/srv/etc-restore",
+        overwrite=True,
+        backup=True,
     )
     _h, method, params = fake_pool.calls[0]
     assert method == "restore_dir"
     assert params == {
         "snapshot": "rpool@s1",
         "snapshot_path": "etc",
-        "target_path": str(tmp_path / "etc-restore"),
-        "overwrite": False,
-        "backup_path": None,
+        "target_path": "/srv/etc-restore",
+        "overwrite": True,
+        "backup": True,
     }

@@ -66,9 +66,10 @@ per file; for anything larger, run `sha256sum` directly on the host.
 `restore_file(host="bork", snapshot="rpool/srv@daily-2026-06-03",
 snapshot_path="backups/important.tar.gz",
 target_path="/srv/backups/important.tar.gz")` writes the snapshot's
-copy directly to the live filesystem on bork — no workstation hop. This
-is the only writable tool zsnoop-mcp exposes and is **disabled per host
-by default**: bork must have `allow_restore = true` and a non-empty
+copy directly to the live filesystem on bork — no workstation hop.
+`restore_file` and `restore_dir` are the only writable tools zsnoop-mcp
+exposes, and both are **disabled per host by default**: bork must have
+`allow_restore = true` and a non-empty
 `restore_paths` allowlist in `hosts.toml` (e.g. `["/srv/", "/home/mch/"]`),
 and `target_path` must canonicalise to a path under one of those
 prefixes. See [docs/INSTALL.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/INSTALL.md)

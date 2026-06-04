@@ -1868,8 +1868,15 @@ def _validate_restore_target_agent_side(target: str) -> Path:
     """
     if not isinstance(target, str):
         raise InvalidParams("target_path must be a string")
-    if "\x00" in target:
-        raise PathError("target_path may not contain NUL")
+    # Match the server's batch-breaking-char rejection (newline / CR / NUL).
+    # The agent doesn't speak the sftp batch protocol, but rejecting these
+    # matters as a documented invariant: an agent invoked directly with such
+    # a path could otherwise corrupt log messages / JSON-RPC frames downstream.
+    for bad in ("\n", "\r", "\x00"):
+        if bad in target:
+            raise PathError(
+                "target_path may not contain newline, carriage-return, or NUL",
+            )
     if not target.startswith("/"):
         raise PathError(f"target_path must be absolute: {target!r}")
     if any(target.startswith(p) for p in _RESTORE_DENY_PREFIXES):
@@ -1894,10 +1901,15 @@ def m_restore_file(params: dict[str, Any]) -> dict[str, Any]:
     directory must already exist (we don't ``mkdir -p`` — the operator stays
     in control of directory creation).
 
-    ``overwrite`` is the user's intent; ``backup_path`` is precomputed
-    server-side (``<target>.zsnoop-backup-<UTC-isoformat>``). When both are
-    supplied, the existing target is renamed to ``backup_path`` before the
-    new file is written — atomic on the same filesystem.
+    ``overwrite`` and ``backup`` are the caller's intent. Existence and
+    backup-path computation live entirely here on the agent — the server
+    deliberately doesn't poke at ``target_path`` on its own filesystem
+    (it's a *remote* path from the server's perspective). When the target
+    exists, ``overwrite=False`` raises; ``overwrite=True`` replaces. When
+    additionally ``backup=True``, the agent computes
+    ``<target>.zsnoop-backup-<UTC-isoformat>`` (timestamp from the
+    *agent's* clock) and atomically renames the existing target there
+    before writing the new content — so a wrong restore is reversible.
 
     Metadata: ``shutil.copy2`` preserves mtime, atime and mode; xattrs are
     copied where the platform supports it. Ownership (uid/gid) is NOT
@@ -1908,9 +1920,7 @@ def m_restore_file(params: dict[str, Any]) -> dict[str, Any]:
     snapshot_path = _require_str(params, "snapshot_path")
     target_path = _require_str(params, "target_path")
     overwrite = bool(params.get("overwrite", False))
-    backup_path_param = params.get("backup_path")
-    if backup_path_param is not None and not isinstance(backup_path_param, str):
-        raise InvalidParams("backup_path must be a string or null")
+    backup = bool(params.get("backup", False))
 
     _, src = resolve_under_snapshot(snapshot, snapshot_path)
     try:
@@ -1938,14 +1948,15 @@ def m_restore_file(params: dict[str, Any]) -> dict[str, Any]:
             raise PathError(
                 f"target_path is a directory; restore_file needs a file path: {dst}",
             )
-        if backup_path_param is not None:
+        if backup:
+            backup_path = f"{dst}.zsnoop-backup-{datetime.now(UTC).isoformat()}"
             # Atomic same-filesystem rename — old content preserved under
             # the backup name before we write the new content in its place.
             try:
-                dst.rename(backup_path_param)
+                dst.rename(backup_path)
             except OSError as e:
                 raise PathError(f"could not back up existing target: {e}") from e
-            backed_up = backup_path_param
+            backed_up = backup_path
 
     try:
         shutil.copy2(src, dst)
@@ -1969,18 +1980,22 @@ def m_restore_dir(params: dict[str, Any]) -> dict[str, Any]:
     *inside* the tree are copied as symlinks (``shutil.copytree(...,
     symlinks=True)``) — faithful to the snapshot's structure.
 
-    Target-side: ``target_path`` is the new directory's full path. Its parent
-    must exist; the leaf must not exist (or, with ``overwrite=true``, is
-    renamed to ``backup_path`` and replaced). Same denylist + path-shape
+    Target-side: ``target_path`` is the new directory's full path. Its
+    parent must exist. An existing target is refused unless
+    ``overwrite=True``; an existing *file* (or other non-directory) is
+    refused outright — replacing a file with a directory tree is almost
+    always a typo, so we surface that as a clear error rather than letting
+    ``shutil.rmtree`` raise ``NotADirectoryError`` further down. With
+    ``overwrite=True`` + ``backup=True`` the agent computes
+    ``<target>.zsnoop-backup-<UTC-isoformat>`` and atomically renames the
+    existing tree there before writing. Same denylist + path-shape
     invariants as ``restore_file``. Ownership is NOT preserved.
     """
     snapshot = _require_str(params, "snapshot")
     snapshot_path = _require_str(params, "snapshot_path")
     target_path = _require_str(params, "target_path")
     overwrite = bool(params.get("overwrite", False))
-    backup_path_param = params.get("backup_path")
-    if backup_path_param is not None and not isinstance(backup_path_param, str):
-        raise InvalidParams("backup_path must be a string or null")
+    backup = bool(params.get("backup", False))
 
     _, src = resolve_under_snapshot(snapshot, snapshot_path)
     try:
@@ -2002,22 +2017,26 @@ def m_restore_dir(params: dict[str, Any]) -> dict[str, Any]:
             raise PathError(
                 f"target_path already exists: {dst} — pass overwrite=true to replace it",
             )
-        if backup_path_param is not None:
+        if not dst.is_dir():
+            raise PathError(
+                f"target_path is a file; restore_dir replaces a directory tree, not a file: {dst}",
+            )
+        if backup:
+            backup_path = f"{dst}.zsnoop-backup-{datetime.now(UTC).isoformat()}"
             try:
-                dst.rename(backup_path_param)
+                dst.rename(backup_path)
             except OSError as e:
                 raise PathError(f"could not back up existing target: {e}") from e
-            backed_up = backup_path_param
+            backed_up = backup_path
 
     try:
         # symlinks=True: preserve in-tree symlinks as symlinks rather than
-        # following them. dirs_exist_ok=False: if `dst` exists at this point
-        # (overwrite without backup), copytree refuses — we route the
-        # overwrite-without-backup case through an explicit rmtree below
-        # so the failure modes stay distinct.
+        # following them. dirs_exist_ok=False on copytree: at this point
+        # if `dst` still exists it means overwrite=True + backup=False
+        # (i.e., caller asked to replace without backing up) — clear it
+        # explicitly so the failure modes stay distinct from a "target
+        # leaked into existence between checks" scenario.
         if dst.exists():
-            # overwrite=True, backup_path_param=None: caller asked to
-            # replace without backing up. Remove then copy.
             shutil.rmtree(dst)
         shutil.copytree(src, dst, symlinks=True)
     except OSError as e:

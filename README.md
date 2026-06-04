@@ -17,7 +17,10 @@ An MCP server for **read-only exploration of ZFS snapshots on remote hosts**.
 
 Browse, diff, search, and read files from any snapshot on any of your ZFS
 hosts through your AI assistant, over a single persistent SSH connection per
-host. No mutation operations are ever exposed.
+host. Read-only by default; the writable `restore_file` / `restore_dir`
+tools (v0.4.0+) are opt-in per host and bounded by an operator-defined
+path allowlist — with the stock config, nothing on the remote can be
+written.
 
 ## Quickstart
 

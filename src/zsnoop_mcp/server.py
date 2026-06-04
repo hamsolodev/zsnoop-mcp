@@ -10,6 +10,7 @@ forwarding ISO 8601 timestamps to the agent.
 from __future__ import annotations
 
 import asyncio
+import posixpath
 import re
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -122,22 +123,32 @@ def _validate_restore_target(
     *,
     allowed_prefixes: tuple[str, ...],
 ) -> str:
-    """Validate and canonicalise a restore target path.
+    """Validate and canonicalise a *remote* restore target path.
 
     Rejects relative paths, batch-breaking characters, kernel virtual
     filesystems, snapshot trees, and any target NOT under one of the
-    operator's ``allowed_prefixes``. Returns the canonical absolute path:
-    ``Path.resolve(strict=False)`` collapses ``..`` segments and follows
-    existing symlinks BEFORE the allowlist check, so ``/srv/../etc/passwd``
-    or a symlink whose target escapes the allowlist is rejected here rather
-    than passed to the agent verbatim. Prefix matching is done with a
-    trailing-slash form on both sides so ``/srv/foobar`` is *not* a
-    false-positive match for ``/srv/foo/``.
+    operator's ``allowed_prefixes``. Returns the canonical absolute path.
+
+    Canonicalisation is **pure-string** via :func:`posixpath.normpath` —
+    collapsing ``..`` / ``.`` segments and normalising ``//``. We
+    deliberately do NOT use ``Path.resolve()`` here even though it would
+    also follow symlinks: ``target_path`` is a path on the *remote* host,
+    and ``resolve()`` consults the *server's* (operator's workstation)
+    filesystem — which can either follow an unrelated local symlink and
+    reject a legitimate restore, or fail to follow a remote symlink and
+    allow a path that escapes the allowlist on the actual target machine.
+    The agent re-validates path-shape invariants and the denylist on the
+    remote side, where symlink-escape resistance properly belongs.
+
+    Prefix matching uses trailing-slash form on both sides so
+    ``/srv/foobar`` is *not* a false-positive match for ``/srv/foo/``.
     """
     _reject_batch_breaking_chars(target_path, label="target_path")
     if not target_path.startswith("/"):
         raise ValueError(f"target_path must be absolute: {target_path!r}")
-    resolved = str(Path(target_path).resolve(strict=False))
+    # Pure-string canonicalisation: collapse `..` / `.` / `//` without
+    # touching the server's local filesystem (target_path is remote).
+    resolved = posixpath.normpath(target_path)
     canon = resolved if resolved.endswith("/") else resolved + "/"
     if any(canon.startswith(p) for p in _RESTORE_DENY_PREFIXES):
         raise ValueError(
@@ -153,48 +164,6 @@ def _validate_restore_target(
             f"restore_paths prefix: {list(allowed_prefixes)}",
         )
     return resolved
-
-
-def _check_restore_target_existence(
-    target_str: str,
-    *,
-    overwrite: bool,
-    backup: bool,
-    expects_file: bool,
-) -> str | None:
-    """Check the target's live-filesystem state against overwrite/backup intent.
-
-    Returns the backup_path to forward to the agent (or ``None`` if no
-    backup is to be taken), or raises ``ValueError`` on incompatible state.
-
-    Lives in a sync helper rather than inline in the async restore tools so
-    pathlib I/O (``Path.exists`` / ``Path.is_dir``) doesn't trip ASYNC240
-    in the event-loop body; the checks are tiny single ``stat`` syscalls
-    so off-loading to a thread would be more overhead than the syscall.
-
-    ``expects_file=True`` (``restore_file``) refuses an existing directory
-    at the target unconditionally — replacing a file with a directory tree
-    is almost always a typo. ``expects_file=False`` (``restore_dir``)
-    refuses an existing regular file by symmetric logic.
-    """
-    target = Path(target_str)
-    if not target.exists():
-        return None
-    if not overwrite:
-        raise ValueError(
-            f"target_path already exists: {target} — pass overwrite=true to replace it",
-        )
-    if expects_file and target.is_dir():
-        raise ValueError(
-            f"target_path is a directory; restore_file needs a file path: {target}",
-        )
-    if not expects_file and not target.is_dir():
-        raise ValueError(
-            f"target_path is a file; restore_dir replaces a directory tree, not a file: {target}",
-        )
-    if backup:
-        return f"{target_str}.zsnoop-backup-{datetime.now(UTC).isoformat()}"
-    return None
 
 
 def _validate_fetch_path(path: str) -> str:
@@ -1007,15 +976,12 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
                 target_path,
                 allowed_prefixes=host_config.restore_paths,
             )
-            backup_path = _check_restore_target_existence(
-                tp,
-                overwrite=overwrite,
-                backup=backup,
-                expects_file=True,
-            )
         except ValueError as e:
             raise ValueError(str(e)) from e
 
+        # Existence checks and the backup_path timestamp live on the agent
+        # (the *only* side with authoritative knowledge of the remote
+        # filesystem). The server just forwards the user's intent flags.
         return await _call(
             host,
             "restore_file",
@@ -1024,7 +990,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
                 "snapshot_path": sp,
                 "target_path": tp,
                 "overwrite": overwrite,
-                "backup_path": backup_path,
+                "backup": backup,
             },
         )
 
@@ -1067,12 +1033,6 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
                 target_path,
                 allowed_prefixes=host_config.restore_paths,
             )
-            backup_path = _check_restore_target_existence(
-                tp,
-                overwrite=overwrite,
-                backup=backup,
-                expects_file=False,
-            )
         except ValueError as e:
             raise ValueError(str(e)) from e
 
@@ -1084,7 +1044,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
                 "snapshot_path": sp,
                 "target_path": tp,
                 "overwrite": overwrite,
-                "backup_path": backup_path,
+                "backup": backup,
             },
         )
 
