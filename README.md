@@ -13,7 +13,8 @@
 - ⌛ *"Find everything deleted under `/home/youruser` in the last week, and show me when each thing was last present."*
 - 🏥 *"Are any of my pools throwing disk errors? When was the last scrub?"*
 
-An MCP server for **read-only exploration of ZFS snapshots on remote hosts**.
+An MCP server for **ZFS snapshot exploration and recovery on remote hosts** —
+read-only by default, with opt-in `restore_*` tools (v0.4.0+) gated per host.
 
 Browse, diff, search, and read files from any snapshot on any of your ZFS
 hosts through your AI assistant, over a single persistent SSH connection per
