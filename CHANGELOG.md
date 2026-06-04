@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-04
+
+First release with **writable** tools. Read-only-by-default is preserved
+for any pre-existing host configuration; the new tools are inert without
+explicit per-host opt-in.
+
+### Added
+
+- **`restore_file` / `restore_dir` tools** — restore a snapshot file or
+  directory subtree to a path on the *server* (not the workstation —
+  that's `fetch_*`). The first writable methods in the project. Disabled
+  per host by default; require `allow_restore = true` and a non-empty
+  `restore_paths` allowlist in `hosts.toml` to use. Target paths are
+  canonicalised (`Path.resolve`) before the allowlist check (so
+  ``/srv/../etc/passwd`` and symlinked escapes are rejected, not
+  silently restored to the resolved path) and a universal denylist
+  refuses ``/proc``, ``/sys``, ``/dev``, and any path containing
+  ``/.zfs/snapshot/`` regardless of operator settings. `overwrite=False`
+  default; opt-in `backup=True` atomically renames the existing target
+  to ``<target>.zsnoop-backup-<UTC-isoformat>`` before replacing it, so
+  a wrong restore is reversible. Symlink sources refused (restore the
+  file the symlink points to instead). In-tree symlinks preserved as
+  symlinks by `restore_dir`. Ownership (uid/gid) not preserved — use
+  `sudo` mode for root-owned recoveries. See
+  [docs/SECURITY.md](docs/SECURITY.md) G7 for the full validation flow
+  and [docs/INSTALL.md](docs/INSTALL.md) for the config keys.
+- **`HostConfig.allow_restore` / `restore_paths`** config fields with
+  full validation at load time (must be non-empty when enabled, entries
+  must be absolute, entries are trailing-slash normalised so
+  `/home/mch` and `/home/mch/` are equivalent).
+
+### Changed
+
+- **G1 reframed** (`docs/SECURITY.md`): from "no mutation operations are
+  ever exposed" to "no mutation operations *by default*; the two
+  `restore_*` methods are opt-in per host and bounded by a mandatory
+  per-host path allowlist". Default install of any pre-existing host
+  configuration remains read-only because both gating keys default off /
+  empty.
+- **README** intro softened ("Read-only by default" rather than
+  "Read-only"), with a one-sentence note that restore is opt-in.
+- **README "Tools exposed to the LLM" table reorganised** into seven
+  workflow-grouped subsections (discovery, snapshot inventory,
+  browsing & sizing, reading content, comparing & tracing change,
+  recovery to workstation, recovery in place on the server). Easier to
+  scan and surfaces the read-only vs writable split visually.
+- **Agent version** bumped to **0.4.0**. Dispatcher test
+  (`test_methods_table_contains_no_mutating_zfs_operations`, renamed
+  from `_no_mutating_operations`) clarifies that the forbidden set
+  covers mutating ZFS *subcommands*; the writable restore methods use
+  `shutil`, not `zfs`, and are gated by server config.
+
 ## [0.3.1] — 2026-05-28
 
 Field-testing every tool against a live pool surfaced four issues, all

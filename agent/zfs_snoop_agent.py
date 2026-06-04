@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import stat as stat_mod
 import subprocess
@@ -45,7 +46,7 @@ JsonId = str | int | float | None
 # Constants
 # ----------------------------------------------------------------------------
 
-AGENT_VERSION: Final = "0.3.1"
+AGENT_VERSION: Final = "0.4.0"
 PROTOCOL_VERSION: Final = "1"
 
 # Hard caps the agent will never exceed regardless of caller-provided values.
@@ -1842,6 +1843,195 @@ def m_checksum_file(params: dict[str, Any]) -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------------
+# Restore (write) methods — opt-in per host via server config (v0.4.0).
+# These are the ONLY methods that mutate the live filesystem; the server
+# gates them on ``HostConfig.allow_restore`` and pre-validates target_path
+# against the operator's ``restore_paths`` allowlist. The checks below are
+# belt-and-braces (independent of the server) and do NOT enforce the
+# per-host allowlist — the agent has no knowledge of the operator's config.
+# ----------------------------------------------------------------------------
+
+# Paths the agent will never write to, regardless of the operator's
+# ``restore_paths`` allowlist — kernel virtual filesystems and snapshot
+# trees (read-only by ZFS but worth refusing explicitly with a clear error).
+_RESTORE_DENY_PREFIXES: Final = ("/proc/", "/sys/", "/dev/")
+_RESTORE_DENY_SUBSTRINGS: Final = ("/.zfs/snapshot/",)
+
+
+def _validate_restore_target_agent_side(target: str) -> Path:
+    """Belt-and-braces validation of the *target_path* the server sent.
+
+    The server applies the per-host ``restore_paths`` allowlist + the same
+    denylist; this re-applies the universal denylist + path-shape invariants
+    so a bug or bypass on the server side can't make the agent overwrite
+    something pathological. Returns the validated absolute ``Path``.
+    """
+    if not isinstance(target, str):
+        raise InvalidParams("target_path must be a string")
+    if "\x00" in target:
+        raise PathError("target_path may not contain NUL")
+    if not target.startswith("/"):
+        raise PathError(f"target_path must be absolute: {target!r}")
+    if any(target.startswith(p) for p in _RESTORE_DENY_PREFIXES):
+        raise PathError(f"refusing to restore under denied prefix: {target!r}")
+    if any(s in target for s in _RESTORE_DENY_SUBSTRINGS):
+        raise PathError(f"refusing to restore into a snapshot tree: {target!r}")
+    return Path(target)
+
+
+def m_restore_file(params: dict[str, Any]) -> dict[str, Any]:
+    """Restore one file from a snapshot to *target_path* on the live filesystem.
+
+    Source-side: same path resolution and symlink discipline as ``read_file``
+    / ``checksum_file`` — must be a regular file in the snapshot (a symlink
+    source is refused; restore the file the symlink points to directly if
+    that's what you want).
+
+    Target-side: ``target_path`` is the absolute live-filesystem destination
+    *as already validated against the per-host allowlist by the server*. The
+    agent re-applies the universal denylist (``/proc``, ``/sys``, ``/dev``,
+    ``.zfs/snapshot/``) and path-shape invariants. ``target_path``'s parent
+    directory must already exist (we don't ``mkdir -p`` — the operator stays
+    in control of directory creation).
+
+    ``overwrite`` is the user's intent; ``backup_path`` is precomputed
+    server-side (``<target>.zsnoop-backup-<UTC-isoformat>``). When both are
+    supplied, the existing target is renamed to ``backup_path`` before the
+    new file is written — atomic on the same filesystem.
+
+    Metadata: ``shutil.copy2`` preserves mtime, atime and mode; xattrs are
+    copied where the platform supports it. Ownership (uid/gid) is NOT
+    preserved — the restored file is owned by the agent's effective user.
+    For root-owned recoveries, run the agent under sudo mode on that host.
+    """
+    snapshot = _require_str(params, "snapshot")
+    snapshot_path = _require_str(params, "snapshot_path")
+    target_path = _require_str(params, "target_path")
+    overwrite = bool(params.get("overwrite", False))
+    backup_path_param = params.get("backup_path")
+    if backup_path_param is not None and not isinstance(backup_path_param, str):
+        raise InvalidParams("backup_path must be a string or null")
+
+    _, src = resolve_under_snapshot(snapshot, snapshot_path)
+    try:
+        src_st = src.lstat()
+    except OSError as e:
+        raise PathError(f"could not stat source: {e}") from e
+    if stat_mod.S_ISLNK(src_st.st_mode):
+        raise PathError(f"refusing to restore a symlink source: {snapshot_path!r}")
+    if not stat_mod.S_ISREG(src_st.st_mode):
+        raise PathError(f"source is not a regular file: {snapshot_path!r}")
+
+    dst = _validate_restore_target_agent_side(target_path)
+    if not dst.parent.is_dir():
+        raise PathError(
+            f"target_path parent does not exist or is not a directory: {dst.parent}",
+        )
+
+    backed_up: str | None = None
+    if dst.exists():
+        if not overwrite:
+            raise PathError(
+                f"target_path already exists: {dst} — pass overwrite=true to replace it",
+            )
+        if dst.is_dir():
+            raise PathError(
+                f"target_path is a directory; restore_file needs a file path: {dst}",
+            )
+        if backup_path_param is not None:
+            # Atomic same-filesystem rename — old content preserved under
+            # the backup name before we write the new content in its place.
+            try:
+                dst.rename(backup_path_param)
+            except OSError as e:
+                raise PathError(f"could not back up existing target: {e}") from e
+            backed_up = backup_path_param
+
+    try:
+        shutil.copy2(src, dst)
+    except OSError as e:
+        raise PathError(f"could not restore: {e}") from e
+
+    size = dst.stat().st_size
+    return {
+        "snapshot": snapshot,
+        "snapshot_path": snapshot_path,
+        "target_path": str(dst),
+        "size_bytes": size,
+        "backup_path": backed_up,
+    }
+
+
+def m_restore_dir(params: dict[str, Any]) -> dict[str, Any]:
+    """Restore a directory subtree from a snapshot to *target_path*.
+
+    Source-side: must resolve to a directory in the snapshot. Symlinks
+    *inside* the tree are copied as symlinks (``shutil.copytree(...,
+    symlinks=True)``) — faithful to the snapshot's structure.
+
+    Target-side: ``target_path`` is the new directory's full path. Its parent
+    must exist; the leaf must not exist (or, with ``overwrite=true``, is
+    renamed to ``backup_path`` and replaced). Same denylist + path-shape
+    invariants as ``restore_file``. Ownership is NOT preserved.
+    """
+    snapshot = _require_str(params, "snapshot")
+    snapshot_path = _require_str(params, "snapshot_path")
+    target_path = _require_str(params, "target_path")
+    overwrite = bool(params.get("overwrite", False))
+    backup_path_param = params.get("backup_path")
+    if backup_path_param is not None and not isinstance(backup_path_param, str):
+        raise InvalidParams("backup_path must be a string or null")
+
+    _, src = resolve_under_snapshot(snapshot, snapshot_path)
+    try:
+        src_st = src.lstat()
+    except OSError as e:
+        raise PathError(f"could not stat source: {e}") from e
+    if not stat_mod.S_ISDIR(src_st.st_mode):
+        raise PathError(f"source is not a directory: {snapshot_path!r}")
+
+    dst = _validate_restore_target_agent_side(target_path)
+    if not dst.parent.is_dir():
+        raise PathError(
+            f"target_path parent does not exist or is not a directory: {dst.parent}",
+        )
+
+    backed_up: str | None = None
+    if dst.exists():
+        if not overwrite:
+            raise PathError(
+                f"target_path already exists: {dst} — pass overwrite=true to replace it",
+            )
+        if backup_path_param is not None:
+            try:
+                dst.rename(backup_path_param)
+            except OSError as e:
+                raise PathError(f"could not back up existing target: {e}") from e
+            backed_up = backup_path_param
+
+    try:
+        # symlinks=True: preserve in-tree symlinks as symlinks rather than
+        # following them. dirs_exist_ok=False: if `dst` exists at this point
+        # (overwrite without backup), copytree refuses — we route the
+        # overwrite-without-backup case through an explicit rmtree below
+        # so the failure modes stay distinct.
+        if dst.exists():
+            # overwrite=True, backup_path_param=None: caller asked to
+            # replace without backing up. Remove then copy.
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst, symlinks=True)
+    except OSError as e:
+        raise PathError(f"could not restore: {e}") from e
+
+    return {
+        "snapshot": snapshot,
+        "snapshot_path": snapshot_path,
+        "target_path": str(dst),
+        "backup_path": backed_up,
+    }
+
+
+# ----------------------------------------------------------------------------
 # Method allowlist (defence in depth: G1)
 # ----------------------------------------------------------------------------
 
@@ -1871,6 +2061,13 @@ METHODS: Final[dict[str, Any]] = {
     "stale_snapshots": m_stale_snapshots,
     "size_delta": m_size_delta,
     "checksum_file": m_checksum_file,
+    # Writable methods — opt-in per host on the server side (G1 revised in
+    # v0.4.0). Listed here so the dispatcher can find them; not "forbidden
+    # mutation" operations in the zfs-subcommand sense, but the server
+    # gates them on ``HostConfig.allow_restore`` so a stock install with
+    # no config change is unaffected.
+    "restore_file": m_restore_file,
+    "restore_dir": m_restore_dir,
 }
 
 

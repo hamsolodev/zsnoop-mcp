@@ -110,8 +110,14 @@ def test_handler_raising_unexpected_returns_internal_error(
 # ---- allowlist defence ------------------------------------------------------
 
 
-def test_methods_table_contains_no_mutating_operations() -> None:
-    """G1: the dispatch table must never expose write/mutate operations."""
+def test_methods_table_contains_no_mutating_zfs_operations() -> None:
+    """G1: the dispatch table must never expose mutating *ZFS subcommand*
+    operations. (v0.4.0 added ``restore_file``/``restore_dir``, which write
+    to the live filesystem but go through Python's shutil — not zfs — and
+    are gated server-side by ``HostConfig.allow_restore``. They are
+    application-level methods, not ZFS subcommands, and are excluded
+    from this list deliberately. See ``test_restore_methods_present`` for
+    the explicit assertion that they exist.)"""
     forbidden = {
         "destroy",
         "snapshot",
@@ -166,5 +172,19 @@ def test_methods_table_is_what_we_expect() -> None:
         "stale_snapshots",
         "size_delta",
         "checksum_file",
+        # v0.4.0 writable methods. Server gates them on allow_restore;
+        # a stock install is unaffected without explicit opt-in.
+        "restore_file",
+        "restore_dir",
     }
     assert set(agent.METHODS) == expected
+
+
+def test_restore_methods_present() -> None:
+    """v0.4.0 writable methods exist in the dispatch table. Server-side
+    gating (``HostConfig.allow_restore``) is what keeps them inert by
+    default — the agent itself will happily restore when invoked
+    directly, so the gating MUST live in the server. Tested separately
+    in tests/test_server.py."""
+    assert "restore_file" in agent.METHODS
+    assert "restore_dir" in agent.METHODS

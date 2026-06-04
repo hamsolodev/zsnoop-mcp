@@ -93,6 +93,16 @@ class HostConfig:
     remote_python: str = "python3"
     ssh_options: tuple[str, ...] = ()
     pools: tuple[str, ...] = ()
+    # Per-host opt-in for the writable restore tools (v0.4.0). With these two
+    # at their defaults (off / empty), the host is strictly read-only — the
+    # ``restore_file`` / ``restore_dir`` server tools refuse before invoking
+    # the agent. When ``allow_restore`` is true, ``restore_paths`` must be a
+    # non-empty list of absolute path prefixes; restores are only permitted
+    # under one of those prefixes. Entries are stored trailing-slash
+    # normalised so prefix matching is unambiguous (``/home/mch`` and
+    # ``/home/mch/`` both round-trip as ``/home/mch/``).
+    allow_restore: bool = False
+    restore_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the host stanza after construction."""
@@ -114,6 +124,18 @@ class HostConfig:
             raise ConfigError(
                 f"host {self.name!r}: agent_path is required when agent_mode='preinstalled'",
             )
+        if self.allow_restore:
+            if not self.restore_paths:
+                raise ConfigError(
+                    f"host {self.name!r}: restore_paths must be a non-empty list "
+                    f"of absolute path prefixes when allow_restore = true",
+                )
+            for p in self.restore_paths:
+                if not p.startswith("/"):
+                    raise ConfigError(
+                        f"host {self.name!r}: restore_paths entries must be "
+                        f"absolute paths (start with '/'): {p!r}",
+                    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +198,8 @@ _KNOWN_HOST_KEYS = frozenset(
         "remote_python",
         "ssh_options",
         "pools",
+        "allow_restore",
+        "restore_paths",
     },
 )
 
@@ -194,7 +218,29 @@ def _parse_host(name: str, stanza: dict[str, Any]) -> HostConfig:
         remote_python=_optional_str(name, stanza, "remote_python", "python3"),
         ssh_options=_optional_str_list(name, stanza, "ssh_options"),
         pools=_optional_str_list(name, stanza, "pools"),
+        allow_restore=_optional_bool(name, stanza, "allow_restore", default=False),
+        restore_paths=_parse_restore_paths(name, stanza),
     )
+
+
+def _parse_restore_paths(host: str, stanza: dict[str, Any]) -> tuple[str, ...]:
+    """Parse ``restore_paths`` and normalise to trailing-slash form.
+
+    Validates as a list-of-strings and rejects empty / whitespace-only entries
+    up front (they would otherwise collapse to ``"/"`` after normalisation —
+    silently widening the allowlist to the entire filesystem). The
+    cross-field rule "non-empty when allow_restore = true" lives in
+    :meth:`HostConfig.__post_init__`.
+    """
+    raw = _optional_str_list(host, stanza, "restore_paths")
+    out: list[str] = []
+    for p in raw:
+        if not p.strip():
+            raise ConfigError(
+                f"host {host!r}: restore_paths entries must be non-empty",
+            )
+        out.append(p if p.endswith("/") else p + "/")
+    return tuple(out)
 
 
 def _optional_nullable_str(host: str, stanza: dict[str, Any], key: str) -> str | None:

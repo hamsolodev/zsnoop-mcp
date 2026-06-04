@@ -58,6 +58,44 @@ Unlike `read_file` (capped at 4 MiB), `checksum_file` hashes the full file on
 the remote side and returns only the digest. It enforces a 256 MiB hard cap
 per file; for anything larger, run `sha256sum` directly on the host.
 
+## Restoring in place — "put it back where it was on the server" (v0.4.0+, opt-in)
+
+> "Someone deleted `/srv/backups/important.tar.gz` on bork — restore
+> yesterday's copy back to that exact path."
+
+`restore_file(host="bork", snapshot="rpool/srv@daily-2026-06-03",
+snapshot_path="backups/important.tar.gz",
+target_path="/srv/backups/important.tar.gz")` writes the snapshot's
+copy directly to the live filesystem on bork — no workstation hop. This
+is the only writable tool zsnoop-mcp exposes and is **disabled per host
+by default**: bork must have `allow_restore = true` and a non-empty
+`restore_paths` allowlist in `hosts.toml` (e.g. `["/srv/", "/home/mch/"]`),
+and `target_path` must canonicalise to a path under one of those
+prefixes. See [docs/INSTALL.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/INSTALL.md)
+for the config and [docs/SECURITY.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md)
+(G7) for the threat model.
+
+> "Same idea, but the live file is still there — overwrite it but keep
+> a copy of the current content first."
+
+`restore_file(..., overwrite=True, backup=True)` renames the existing
+target to `<target>.zsnoop-backup-<UTC-isoformat>` (atomic same-fs
+rename) before writing the restored content. If you change your mind,
+rename the backup back. The response carries `backup_path` so the
+operator knows exactly where the prior content went.
+
+> "Restore the whole `/srv/configs/` directory from the weekly snapshot,
+> wiping the current one — but back it up first."
+
+`restore_dir(host="bork", snapshot="rpool/srv@weekly-2026-06-01",
+snapshot_path="configs", target_path="/srv/configs", overwrite=True,
+backup=True)`. The existing directory tree is renamed to a
+`.zsnoop-backup-<ts>` sibling before the snapshot tree is copied into
+place. In-tree symlinks are preserved as symlinks (not dereferenced).
+For root-owned restores, the host needs `sudo = true` *in addition to*
+`allow_restore = true` — restore inherits the sudo mode used by the
+read methods.
+
 ## Config drift audit — "when did X change?"
 
 > "What changed in `/etc` on r2d2 between 3 days ago and now?"

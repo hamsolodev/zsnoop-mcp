@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zsnoop-mcp"
-version = "0.3.1"
-description = "MCP server for read-only exploration of ZFS snapshots on remote hosts over SSH (AI-assisted)"
+version = "0.4.0"
+description = "MCP server for ZFS snapshot exploration and recovery on remote hosts over SSH (read-only by default, opt-in restore; AI-assisted)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

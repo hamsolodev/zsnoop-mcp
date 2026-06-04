@@ -108,6 +108,95 @@ def _reject_batch_breaking_chars(value: str, *, label: str) -> None:
         )
 
 
+# Restore (write) targets are bounded by an operator-supplied per-host
+# allowlist (``HostConfig.restore_paths``); additionally these prefixes are
+# always denied, regardless of the operator's allowlist, because writing
+# into them is either nonsensical (kernel virtual fs) or refused by ZFS
+# anyway (snapshot trees) — fail fast with a clear error.
+_RESTORE_DENY_PREFIXES: Final = ("/proc/", "/sys/", "/dev/")
+_RESTORE_DENY_SUBSTRINGS: Final = ("/.zfs/snapshot/",)
+
+
+def _validate_restore_target(
+    target_path: str,
+    *,
+    allowed_prefixes: tuple[str, ...],
+) -> str:
+    """Validate and canonicalise a restore target path.
+
+    Rejects relative paths, batch-breaking characters, kernel virtual
+    filesystems, snapshot trees, and any target NOT under one of the
+    operator's ``allowed_prefixes``. Returns the canonical absolute path:
+    ``Path.resolve(strict=False)`` collapses ``..`` segments and follows
+    existing symlinks BEFORE the allowlist check, so ``/srv/../etc/passwd``
+    or a symlink whose target escapes the allowlist is rejected here rather
+    than passed to the agent verbatim. Prefix matching is done with a
+    trailing-slash form on both sides so ``/srv/foobar`` is *not* a
+    false-positive match for ``/srv/foo/``.
+    """
+    _reject_batch_breaking_chars(target_path, label="target_path")
+    if not target_path.startswith("/"):
+        raise ValueError(f"target_path must be absolute: {target_path!r}")
+    resolved = str(Path(target_path).resolve(strict=False))
+    canon = resolved if resolved.endswith("/") else resolved + "/"
+    if any(canon.startswith(p) for p in _RESTORE_DENY_PREFIXES):
+        raise ValueError(
+            f"refusing to restore under denied prefix (kernel virtual fs): {resolved!r}",
+        )
+    if any(s in canon for s in _RESTORE_DENY_SUBSTRINGS):
+        raise ValueError(
+            f"refusing to restore into a snapshot tree: {resolved!r}",
+        )
+    if not any(canon.startswith(p) for p in allowed_prefixes):
+        raise ValueError(
+            f"target_path {resolved!r} is not under any configured "
+            f"restore_paths prefix: {list(allowed_prefixes)}",
+        )
+    return resolved
+
+
+def _check_restore_target_existence(
+    target_str: str,
+    *,
+    overwrite: bool,
+    backup: bool,
+    expects_file: bool,
+) -> str | None:
+    """Check the target's live-filesystem state against overwrite/backup intent.
+
+    Returns the backup_path to forward to the agent (or ``None`` if no
+    backup is to be taken), or raises ``ValueError`` on incompatible state.
+
+    Lives in a sync helper rather than inline in the async restore tools so
+    pathlib I/O (``Path.exists`` / ``Path.is_dir``) doesn't trip ASYNC240
+    in the event-loop body; the checks are tiny single ``stat`` syscalls
+    so off-loading to a thread would be more overhead than the syscall.
+
+    ``expects_file=True`` (``restore_file``) refuses an existing directory
+    at the target unconditionally — replacing a file with a directory tree
+    is almost always a typo. ``expects_file=False`` (``restore_dir``)
+    refuses an existing regular file by symmetric logic.
+    """
+    target = Path(target_str)
+    if not target.exists():
+        return None
+    if not overwrite:
+        raise ValueError(
+            f"target_path already exists: {target} — pass overwrite=true to replace it",
+        )
+    if expects_file and target.is_dir():
+        raise ValueError(
+            f"target_path is a directory; restore_file needs a file path: {target}",
+        )
+    if not expects_file and not target.is_dir():
+        raise ValueError(
+            f"target_path is a file; restore_dir replaces a directory tree, not a file: {target}",
+        )
+    if backup:
+        return f"{target_str}.zsnoop-backup-{datetime.now(UTC).isoformat()}"
+    return None
+
+
 def _validate_fetch_path(path: str) -> str:
     """Reject path segments that would escape the snapshot root.
 
@@ -853,6 +942,151 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             "local_path": str(dest),
             "queried_at": datetime.now(UTC).isoformat(),
         }
+
+    @mcp.tool()
+    async def restore_file(
+        host: str,
+        snapshot: str,
+        snapshot_path: str,
+        target_path: str,
+        overwrite: bool = False,
+        backup: bool = False,
+    ) -> dict[str, Any]:
+        """Restore one file from a snapshot to `target_path` on the *server*.
+
+        Unlike ``fetch_file`` (which copies to your workstation), this writes
+        directly to the host's live filesystem. **Opt-in per host:** the host
+        must have ``allow_restore = true`` and a non-empty ``restore_paths``
+        allowlist in ``hosts.toml``; ``target_path`` must lie under one of
+        those prefixes. Kernel virtual filesystems (``/proc``, ``/sys``,
+        ``/dev``) and snapshot trees (``.zfs/snapshot/``) are always denied
+        regardless of the allowlist.
+
+        ``snapshot_path`` is relative to the snapshot root (leading ``/``
+        stripped, no ``..``). The source must be a regular file (symlinks
+        are refused — restore the file the symlink points to instead).
+
+        ``target_path`` is the absolute path on the server where the file
+        should land. Its parent directory must already exist; the tool does
+        not ``mkdir -p`` (operator stays in control of directory creation).
+        Path is canonicalised with ``Path.resolve`` *before* the allowlist
+        check, so ``/srv/../etc/passwd`` or a symlinked escape is rejected
+        rather than silently restored to the resolved path.
+
+        ``overwrite=False`` (default) refuses if ``target_path`` already
+        exists. With ``overwrite=True`` the existing target is replaced; an
+        existing directory at ``target_path`` is *refused* (this tool
+        restores files — use ``restore_dir`` for trees).
+
+        ``backup=True`` is only honoured when ``overwrite=True`` *and* the
+        target exists: the existing target is renamed to
+        ``<target>.zsnoop-backup-<UTC-isoformat>`` before the restored file
+        is written (atomic same-filesystem rename — so a wrong restore is
+        reversible by renaming the backup back).
+
+        Metadata: mtime, mode, and (platform-dependent) xattrs are
+        preserved. Ownership (uid/gid) is NOT preserved — the restored
+        file is owned by the agent's effective user. For root-owned
+        recoveries, enable sudo mode on the host.
+
+        Returns ``{snapshot, snapshot_path, target_path, size_bytes,
+        backup_path, queried_at}``. ``backup_path`` is ``null`` if no
+        backup was taken (target didn't exist, or ``backup=False``).
+        """
+        _validate_host(host)
+        host_config = config.host(host)
+        if not host_config.allow_restore:
+            raise ValueError(
+                f"restore is disabled on host {host!r}: set "
+                f"allow_restore = true and restore_paths in hosts.toml",
+            )
+        _parse_snapshot_name(snapshot)  # raises on malformed
+        try:
+            sp = _validate_fetch_path(snapshot_path)
+            tp = _validate_restore_target(
+                target_path,
+                allowed_prefixes=host_config.restore_paths,
+            )
+            backup_path = _check_restore_target_existence(
+                tp,
+                overwrite=overwrite,
+                backup=backup,
+                expects_file=True,
+            )
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+
+        return await _call(
+            host,
+            "restore_file",
+            {
+                "snapshot": snapshot,
+                "snapshot_path": sp,
+                "target_path": tp,
+                "overwrite": overwrite,
+                "backup_path": backup_path,
+            },
+        )
+
+    @mcp.tool()
+    async def restore_dir(
+        host: str,
+        snapshot: str,
+        snapshot_path: str,
+        target_path: str,
+        overwrite: bool = False,
+        backup: bool = False,
+    ) -> dict[str, Any]:
+        """Restore a directory subtree from a snapshot to `target_path`.
+
+        Same opt-in / allowlist / denylist rules as ``restore_file``. The
+        source must resolve to a directory in the snapshot; symlinks
+        *inside* the tree are preserved as symlinks (not followed).
+
+        ``target_path``'s parent must already exist. The leaf must not
+        exist unless ``overwrite=True``; with ``overwrite=True`` an
+        existing directory there is replaced (and optionally renamed to a
+        ``.zsnoop-backup-<ts>`` sibling when ``backup=True``). An existing
+        *file* at ``target_path`` is refused — replacing a file with a
+        directory tree is almost always a typo.
+
+        Returns ``{snapshot, snapshot_path, target_path, backup_path,
+        queried_at}``.
+        """
+        _validate_host(host)
+        host_config = config.host(host)
+        if not host_config.allow_restore:
+            raise ValueError(
+                f"restore is disabled on host {host!r}: set "
+                f"allow_restore = true and restore_paths in hosts.toml",
+            )
+        _parse_snapshot_name(snapshot)
+        try:
+            sp = _validate_fetch_path(snapshot_path)
+            tp = _validate_restore_target(
+                target_path,
+                allowed_prefixes=host_config.restore_paths,
+            )
+            backup_path = _check_restore_target_existence(
+                tp,
+                overwrite=overwrite,
+                backup=backup,
+                expects_file=False,
+            )
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+
+        return await _call(
+            host,
+            "restore_dir",
+            {
+                "snapshot": snapshot,
+                "snapshot_path": sp,
+                "target_path": tp,
+                "overwrite": overwrite,
+                "backup_path": backup_path,
+            },
+        )
 
     return mcp
 

@@ -136,6 +136,87 @@ def test_missing_hosts_table_rejected() -> None:
         parse_config({})
 
 
+def test_allow_restore_defaults_to_false_and_paths_empty() -> None:
+    """The two restore fields default off / empty — pre-existing host
+    configs stay strictly read-only after upgrading to 0.4.0."""
+    cfg = parse_config({"hosts": {"x": {"ssh_target": "x"}}})
+    host = cfg.host("x")
+    assert host.allow_restore is False
+    assert host.restore_paths == ()
+
+
+def test_allow_restore_requires_non_empty_restore_paths() -> None:
+    """Enabling restore without a path allowlist is rejected — opt-in is
+    paired with mandatory scope."""
+    with pytest.raises(ConfigError, match="restore_paths must be a non-empty"):
+        parse_config(
+            {"hosts": {"x": {"ssh_target": "x", "allow_restore": True}}},
+        )
+
+
+def test_restore_paths_entries_must_be_absolute() -> None:
+    with pytest.raises(ConfigError, match="restore_paths entries must be absolute"):
+        parse_config(
+            {
+                "hosts": {
+                    "x": {
+                        "ssh_target": "x",
+                        "allow_restore": True,
+                        "restore_paths": ["/srv/", "home/mch/"],
+                    },
+                },
+            },
+        )
+
+
+def test_restore_paths_normalised_to_trailing_slash() -> None:
+    """`/home/mch` and `/home/mch/` both round-trip as `/home/mch/`, so
+    prefix matching against a target_path is unambiguous later."""
+    cfg = parse_config(
+        {
+            "hosts": {
+                "x": {
+                    "ssh_target": "x",
+                    "allow_restore": True,
+                    "restore_paths": ["/home/mch", "/srv/"],
+                },
+            },
+        },
+    )
+    assert cfg.host("x").restore_paths == ("/home/mch/", "/srv/")
+
+
+def test_restore_paths_rejects_empty_entries() -> None:
+    """An empty/whitespace entry would otherwise normalise to ``"/"`` and
+    silently widen the allowlist to the whole filesystem."""
+    with pytest.raises(ConfigError, match="restore_paths entries must be non-empty"):
+        parse_config(
+            {
+                "hosts": {
+                    "x": {
+                        "ssh_target": "x",
+                        "allow_restore": True,
+                        "restore_paths": ["/srv/", ""],
+                    },
+                },
+            },
+        )
+
+
+def test_restore_paths_must_be_list_of_strings() -> None:
+    with pytest.raises(ConfigError, match="restore_paths"):
+        parse_config(
+            {"hosts": {"x": {"ssh_target": "x", "restore_paths": "/srv/"}}},
+        )
+
+
+def test_allow_restore_must_be_bool() -> None:
+    with pytest.raises(ConfigError, match="allow_restore"):
+        parse_config(
+            {"hosts": {"x": {"ssh_target": "x", "allow_restore": "yes"}}},
+        )
+
+
 def test_load_config_round_trip(tmp_path: Path) -> None:
     cfg_file = tmp_path / "hosts.toml"
     cfg_file.write_text(

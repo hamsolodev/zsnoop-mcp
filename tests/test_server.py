@@ -111,6 +111,8 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "checksum_file",
         "fetch_file",
         "fetch_dir",
+        "restore_file",
+        "restore_dir",
     }
 
 
@@ -736,3 +738,361 @@ async def test_fetch_file_local_transport_uses_cp(
     assert "-r" not in cmd
     assert cmd[-1] == str(dest)
     assert batch is None  # local cp carries no stdin batch
+
+
+# ---- restore_file / restore_dir (v0.4.0) -----------------------------------
+
+
+def _restore_cfg(restore_paths: tuple[str, ...] = ("/srv/", "/home/mch/")) -> Config:
+    """Config with a single host that has restore opted-in."""
+    return Config(
+        hosts={
+            "bork": HostConfig(
+                name="bork",
+                ssh_target="bork.lan",
+                allow_restore=True,
+                restore_paths=restore_paths,
+            ),
+        },
+    )
+
+
+async def test_restore_file_rejects_when_allow_restore_disabled(
+    cfg: Config,  # r2d2/c3po — both have allow_restore=False (default)
+    fake_pool: FakePool,
+) -> None:
+    """Stock installs are unaffected: without explicit opt-in per host,
+    restore_* refuses BEFORE doing anything (no agent call, no mutation
+    even attempted)."""
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="restore is disabled on host 'r2d2'"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="r2d2",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path="/srv/foo",
+        )
+    assert fake_pool.calls == []  # never reached the agent
+
+
+async def test_restore_file_rejects_target_outside_allowlist(
+    fake_pool: FakePool,
+) -> None:
+    """target_path must lie under one of the operator's restore_paths
+    prefixes (here: /srv/, /home/mch/). /etc/passwd is not."""
+    server = create_server(fake_pool, _restore_cfg())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="not under any configured restore_paths"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path="/etc/passwd",
+        )
+    assert fake_pool.calls == []
+
+
+async def test_restore_file_canonicalises_dotdot_before_allowlist_check(
+    fake_pool: FakePool,
+) -> None:
+    """`/srv/../etc/passwd` resolves to `/etc/passwd`, which is NOT under
+    the `/srv/` allowlist — must be rejected, not passed through to the
+    agent as-is. Closes a path-traversal style bypass."""
+    server = create_server(fake_pool, _restore_cfg(("/srv/",)))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="not under any configured restore_paths"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path="/srv/../etc/passwd",
+        )
+    assert fake_pool.calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_target",
+    ["/proc/self/mem", "/sys/power/state", "/dev/sda"],
+)
+async def test_restore_file_rejects_kernel_virtual_fs_denylist(
+    fake_pool: FakePool,
+    bad_target: str,
+) -> None:
+    """The denylist applies even when restore_paths is `["/"]` (the
+    operator chose to allow everything) — kernel virtual fs is never a
+    sane restore target and writes there can have side effects far beyond
+    a normal file."""
+    server = create_server(fake_pool, _restore_cfg(("/",)))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="denied prefix"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path=bad_target,
+        )
+
+
+async def test_restore_file_rejects_zfs_snapshot_substring(
+    fake_pool: FakePool,
+) -> None:
+    """Writing into a snapshot tree is refused with a clear error (ZFS
+    would refuse anyway — make the failure mode explicit and early)."""
+    server = create_server(fake_pool, _restore_cfg(("/",)))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="snapshot tree"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path="/home/.zfs/snapshot/x/foo",
+        )
+
+
+async def test_restore_file_rejects_relative_target(fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, _restore_cfg())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must be absolute"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path="srv/foo",
+        )
+
+
+@pytest.mark.parametrize("bad_char", ["\n", "\r", "\0"])
+async def test_restore_file_rejects_target_with_batch_breaking_chars(
+    fake_pool: FakePool,
+    bad_char: str,
+) -> None:
+    """Same control-char rejection as fetch_* (no batch script here, but
+    NUL is illegal in any path and newlines invite log/parse mishandling
+    downstream)."""
+    server = create_server(fake_pool, _restore_cfg())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="newline, carriage-return, or NUL"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path=f"/srv/foo{bad_char}rm bar",
+        )
+
+
+async def test_restore_file_rejects_existing_target_without_overwrite(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "already-there.conf"
+    existing.write_text("don't clobber me")
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="target_path already exists"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path=str(existing),
+        )
+    assert fake_pool.calls == []
+
+
+async def test_restore_file_refuses_directory_destination_even_with_overwrite(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    """A directory at target_path is refused unconditionally for
+    restore_file — restoring a *file* on top of a directory is almost
+    always a typo. Use restore_dir if you meant a tree."""
+    existing_dir = tmp_path / "a-directory"
+    existing_dir.mkdir()
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="is a directory"):
+        await _tool_call(
+            server,
+            "restore_file",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc/foo",
+            target_path=str(existing_dir),
+            overwrite=True,
+        )
+
+
+async def test_restore_file_forwards_validated_params_to_agent(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    """Happy-path forwarding: the server-validated params reach the agent
+    intact, with backup_path=null when not overwriting."""
+    fake_pool.next_result = {
+        "snapshot": "rpool@s1",
+        "snapshot_path": "etc/app.conf",
+        "target_path": str(tmp_path / "app.conf"),
+        "size_bytes": 42,
+        "backup_path": None,
+    }
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    result = await _tool_call(
+        server,
+        "restore_file",
+        host="bork",
+        snapshot="rpool@s1",
+        snapshot_path="etc/app.conf",
+        target_path=str(tmp_path / "app.conf"),
+    )
+    assert len(fake_pool.calls) == 1
+    host, method, params = fake_pool.calls[0]
+    assert host == "bork"
+    assert method == "restore_file"
+    assert params == {
+        "snapshot": "rpool@s1",
+        "snapshot_path": "etc/app.conf",
+        "target_path": str(tmp_path / "app.conf"),
+        "overwrite": False,
+        "backup_path": None,
+    }
+    assert "queried_at" in result  # injected by _call
+
+
+async def test_restore_file_computes_backup_path_when_overwrite_and_backup(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    """With overwrite=True + backup=True + an existing target, the server
+    computes the timestamped backup_path and passes it to the agent for
+    atomic-rename-before-replace."""
+    existing = tmp_path / "to-replace.conf"
+    existing.write_text("old")
+    fake_pool.next_result = {
+        "snapshot": "rpool@s1",
+        "snapshot_path": "etc/x",
+        "target_path": str(existing),
+        "size_bytes": 7,
+        "backup_path": f"{existing}.zsnoop-backup-PLACEHOLDER",
+    }
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    await _tool_call(
+        server,
+        "restore_file",
+        host="bork",
+        snapshot="rpool@s1",
+        snapshot_path="etc/x",
+        target_path=str(existing),
+        overwrite=True,
+        backup=True,
+    )
+    _h, _m, params = fake_pool.calls[0]
+    assert params is not None
+    assert params["overwrite"] is True
+    assert params["backup_path"] is not None
+    assert params["backup_path"].startswith(f"{existing}.zsnoop-backup-")
+    # ISO 8601 timestamp suffix — verify it round-trips.
+    suffix = params["backup_path"].split(".zsnoop-backup-", 1)[1]
+    assert datetime.fromisoformat(suffix).tzinfo is not None
+
+
+async def test_restore_file_backup_ignored_when_target_absent(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    """backup=True with a non-existent target is a no-op (nothing to back
+    up). The agent gets backup_path=null."""
+    fake_pool.next_result = {
+        "snapshot": "rpool@s1",
+        "snapshot_path": "etc/x",
+        "target_path": str(tmp_path / "new.conf"),
+        "size_bytes": 7,
+        "backup_path": None,
+    }
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    await _tool_call(
+        server,
+        "restore_file",
+        host="bork",
+        snapshot="rpool@s1",
+        snapshot_path="etc/x",
+        target_path=str(tmp_path / "new.conf"),
+        backup=True,  # ignored: no existing target
+    )
+    _h, _m, params = fake_pool.calls[0]
+    assert params is not None
+    assert params["backup_path"] is None
+
+
+async def test_restore_dir_rejects_when_allow_restore_disabled(
+    cfg: Config,
+    fake_pool: FakePool,
+) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="restore is disabled"):
+        await _tool_call(
+            server,
+            "restore_dir",
+            host="r2d2",
+            snapshot="rpool@s1",
+            snapshot_path="etc",
+            target_path="/srv/etc-restore",
+        )
+
+
+async def test_restore_dir_refuses_file_destination_with_overwrite(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    """Replacing a file with a directory tree is almost always a typo —
+    rejected even with overwrite=True. Use restore_file if you meant a
+    single file."""
+    existing_file = tmp_path / "is-a-file.txt"
+    existing_file.write_text("not a directory")
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="restore_dir replaces a directory"):
+        await _tool_call(
+            server,
+            "restore_dir",
+            host="bork",
+            snapshot="rpool@s1",
+            snapshot_path="etc",
+            target_path=str(existing_file),
+            overwrite=True,
+        )
+
+
+async def test_restore_dir_forwards_validated_params_to_agent(
+    fake_pool: FakePool,
+    tmp_path: Path,
+) -> None:
+    fake_pool.next_result = {
+        "snapshot": "rpool@s1",
+        "snapshot_path": "etc",
+        "target_path": str(tmp_path / "etc-restore"),
+        "backup_path": None,
+    }
+    server = create_server(fake_pool, _restore_cfg((str(tmp_path) + "/",)))  # type: ignore[arg-type]
+    await _tool_call(
+        server,
+        "restore_dir",
+        host="bork",
+        snapshot="rpool@s1",
+        snapshot_path="etc",
+        target_path=str(tmp_path / "etc-restore"),
+    )
+    _h, method, params = fake_pool.calls[0]
+    assert method == "restore_dir"
+    assert params == {
+        "snapshot": "rpool@s1",
+        "snapshot_path": "etc",
+        "target_path": str(tmp_path / "etc-restore"),
+        "overwrite": False,
+        "backup_path": None,
+    }

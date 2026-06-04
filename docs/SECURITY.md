@@ -36,24 +36,41 @@ the remote user accounts they can already log into. SSH transport security.
 
 ## Guarantees
 
-### G1 — No mutation operations are ever exposed
+### G1 — No mutation operations *by default*; restore is opt-in per host
 
 The agent dispatches RPCs through an **explicit `METHODS` allowlist** in
 `agent/zfs_snoop_agent.py`. Any method not in the dict returns JSON-RPC
-`Method not found` (-32601).
+`Method not found` (-32601). Adding a method requires editing the agent
+source — there is no runtime knob that adds methods to the dispatcher.
 
-Allowlist (read-only): `agent_info`, `list_pools`, `pool_status`,
+**Read-only methods** (the entire surface for any host that hasn't opted
+in to restore): `agent_info`, `list_pools`, `pool_status`,
 `list_datasets`, `dataset_properties`, `list_snapshots`,
 `snapshot_cadence`, `diff_snapshots`, `list_dir`, `size_breakdown`,
 `top_consumers`, `read_file`, `find_files`, `content_grep`,
 `file_history`, `versions_of`, `file_diff`, `snapshots_containing`,
 `first_appearance`, `last_appearance`, `find_deleted`, `bisect_change`,
-`stale_snapshots`, `size_delta`.
+`stale_snapshots`, `size_delta`, `checksum_file`, `fetch_file`,
+`fetch_dir` (the `fetch_*` pair copies *out* to your workstation — the
+server's live filesystem is untouched).
 
-Adding a mutating method requires editing the agent source — there is no
-configuration knob that turns mutation on. The test
-`test_methods_table_contains_no_mutating_operations` asserts that no entry
-matching common destructive zfs subcommands ever leaks into the table.
+**Writable methods** (v0.4.0+): `restore_file`, `restore_dir`. These are
+the only methods that write to the host's live filesystem and they are
+**gated server-side** on per-host config: the server's `restore_file` /
+`restore_dir` tools refuse before invoking the agent unless the host has
+`allow_restore = true` and a non-empty `restore_paths` allowlist in
+`hosts.toml`. Default install of any pre-existing host is unaffected.
+See [G7](#g7--restore-targets-are-bounded-by-an-operator-path-allowlist)
+for the target-path bounds.
+
+Tests: `test_methods_table_contains_no_mutating_zfs_operations` asserts
+no mutating ZFS *subcommand* (e.g. `destroy`, `rollback`, `set`, `clone`)
+ever leaks into the agent's dispatch table — restore methods use
+`shutil`, not `zfs`, and are application-level operations on a different
+layer. `test_methods_table_is_what_we_expect` pins the exact set
+including the two restore methods, so adding or removing a method is a
+deliberate, reviewed change. `test_restore_file_rejects_when_allow_restore_disabled`
+asserts the server gating works.
 
 ### G2 — No shell interpretation of user input
 
@@ -139,6 +156,63 @@ stdout is reserved for JSON-RPC frames. Any log message, debug output, or
 unexpected stderr from a child process is captured and forwarded as a
 structured field in the JSON-RPC error response, not interleaved with the
 wire protocol.
+
+### G7 — Restore targets are bounded by an operator path allowlist
+
+The two writable methods (`restore_file`, `restore_dir`, v0.4.0+) write
+to the host's *live* filesystem. They are off by default and, when
+enabled per host (`allow_restore = true`), the operator must also
+provide a non-empty `restore_paths` allowlist of absolute path
+prefixes. The server's `_validate_restore_target` enforces, in order:
+
+1. `target_path` must be a string starting with `/` (relative paths
+   rejected).
+2. NUL / newline / carriage-return characters are rejected (same helper
+   as `_reject_batch_breaking_chars` used by the sftp fetch path).
+3. The path is canonicalised with `Path.resolve(strict=False)` —
+   collapsing `..` and following existing symlinks — **before** the
+   allowlist and denylist checks. So `/srv/../etc/passwd` and a symlink
+   whose target escapes the allowlist are rejected here, not silently
+   restored to the resolved path.
+4. **Universal denylist** (always denied regardless of the operator's
+   allowlist): paths under `/proc/`, `/sys/`, or `/dev/`, and any path
+   containing `/.zfs/snapshot/`. Kernel virtual filesystems aren't sane
+   restore targets and writes there can have side effects far beyond a
+   normal file; snapshots are read-only in ZFS anyway, but rejecting
+   explicitly gives a clearer error.
+5. **Operator allowlist**: the canonical path must lie under one of the
+   `restore_paths` prefixes. Prefixes are trailing-slash normalised on
+   both sides so `/srv/foobar` is not a false-positive match for
+   `/srv/foo/`.
+
+The agent re-applies the universal denylist + path-shape invariants
+(`_validate_restore_target_agent_side`) as belt-and-braces — a bug or
+bypass on the server side can't make the agent overwrite something
+pathological. The agent does NOT know the operator's per-host allowlist;
+that boundary stays exclusively in the server.
+
+Restore-specific behaviour also enforced server-side:
+
+- `restore_file` refuses if the target is an existing directory (a typo
+  guard — replacing a file with a directory tree is nearly always
+  unintentional). `restore_dir` symmetrically refuses if the target is
+  an existing regular file.
+- `overwrite=False` (default) refuses any existing target. With
+  `overwrite=True` *and* `backup=True`, the server precomputes
+  `backup_path = <target>.zsnoop-backup-<UTC-isoformat>` and the agent
+  atomically renames the existing target to that backup path before
+  writing — so a wrong restore is reversible.
+
+Tested by:
+`test_restore_file_rejects_when_allow_restore_disabled`,
+`test_restore_file_rejects_target_outside_allowlist`,
+`test_restore_file_canonicalises_dotdot_before_allowlist_check`,
+`test_restore_file_rejects_kernel_virtual_fs_denylist`,
+`test_restore_file_rejects_zfs_snapshot_substring`,
+`test_restore_file_belt_and_braces_rejects_denied_prefix` (agent side),
+plus the config tests
+(`test_allow_restore_requires_non_empty_restore_paths`,
+`test_restore_paths_entries_must_be_absolute`).
 
 ## Sudo mode tradeoff
 
