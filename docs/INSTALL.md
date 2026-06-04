@@ -151,9 +151,49 @@ Per-host fields:
 | `remote_python` | `"python3"`                       | Interpreter to use in bootstrap mode.                                                             |
 | `ssh_options`   | `[]`                              | Extra args inserted between `ssh` defaults and target. Ignored when `transport="local"`.          |
 | `pools`         | `[]`                              | Hint to the LLM about which pools exist (optional — use the `list_pools` tool for live discovery). |
+| `allow_restore` | `false`                           | Opt-in to the writable `restore_file` / `restore_dir` tools on this host (v0.4.0+). See below.    |
+| `restore_paths` | `[]`                              | Absolute path prefixes restores may write under. Required (non-empty) when `allow_restore = true`. |
 
 `pools` is metadata only at this layer; the agent itself queries whichever
 datasets it has permission to see.
+
+### Enabling restore (v0.4.0+)
+
+The `restore_file` / `restore_dir` tools write to the host's *live*
+filesystem and are the only mutating operations the server exposes. They
+are **disabled per host by default**; an existing config from earlier
+zsnoop-mcp releases stays strictly read-only after upgrade.
+
+To enable, set both keys on the host:
+
+```toml
+[hosts.bork]
+ssh_target     = "bork.lan"
+sudo           = false                         # or true to restore root-owned files
+allow_restore  = true                          # opt in
+restore_paths  = ["/srv/", "/home/mch/"]       # required: at least one absolute prefix
+```
+
+`restore_paths` is the operator's allowlist of destinations a restore may
+land in: any `target_path` passed to `restore_file` / `restore_dir` must
+canonicalise (`Path.resolve`) to a path under one of these prefixes.
+Entries are trailing-slash normalised on load, so `/home/mch` and
+`/home/mch/` are equivalent. Errors at load time:
+
+- `allow_restore = true` with an empty (or missing) `restore_paths` is
+  rejected — opt-in is paired with mandatory scope.
+- Each `restore_paths` entry must be an absolute path (start with `/`).
+- Empty / whitespace-only entries are rejected (they would otherwise
+  normalise to `"/"` and silently widen the allowlist to the whole
+  filesystem).
+
+The denylist `/proc/`, `/sys/`, `/dev/`, and anything containing
+`/.zfs/snapshot/` is always refused regardless of the allowlist. To
+restore root-owned files (e.g. anything under `/etc/`), pair
+`allow_restore = true` with `sudo = true` — restore inherits the same
+elevated execution mode as the read methods. See
+[SECURITY.md G7](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md)
+for the full validation flow and threat model.
 
 ### Local mode (no SSH)
 

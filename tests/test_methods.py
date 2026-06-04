@@ -6,6 +6,7 @@ import base64
 import hashlib
 import os
 import pathlib
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1488,4 +1489,288 @@ def test_checksum_file_rejects_dotdot(mock_mountpoint: dict[str, Any]) -> None:
     with pytest.raises(agent.PathError):
         agent.m_checksum_file(
             {"snapshot": mock_mountpoint["snapshot_name"], "path": "../etc/passwd"},
+        )
+
+
+# ---- restore_file (v0.4.0) -------------------------------------------------
+
+
+def test_restore_file_copies_to_target_preserving_content_and_mode(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """Happy path: file copied byte-for-byte, mtime/mode preserved by shutil.copy2."""
+    target_dir = tmp_path / "restored"
+    target_dir.mkdir()
+    target = target_dir / "hello.txt"
+    src = mock_mountpoint["files"]["hello"]
+    src_st = src.stat()
+
+    result = agent.m_restore_file(
+        {
+            "snapshot": mock_mountpoint["snapshot_name"],
+            "snapshot_path": "hello.txt",
+            "target_path": str(target),
+            "overwrite": False,
+            "backup_path": None,
+        },
+    )
+
+    assert target.read_bytes() == src.read_bytes()
+    # copy2 preserves mtime + mode.
+    assert int(target.stat().st_mtime) == int(src_st.st_mtime)
+    assert target.stat().st_mode == src_st.st_mode
+    assert result["size_bytes"] == src_st.st_size
+    assert result["backup_path"] is None
+
+
+def test_restore_file_refuses_existing_target_without_overwrite(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    existing = tmp_path / "occupied.txt"
+    existing.write_text("DO NOT TOUCH")
+    with pytest.raises(agent.PathError, match="already exists"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",
+                "target_path": str(existing),
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+    # Untouched.
+    assert existing.read_text() == "DO NOT TOUCH"
+
+
+def test_restore_file_overwrites_with_atomic_backup(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """Backup-then-replace: the existing file lands at backup_path,
+    the restored content lands at target_path."""
+    target = tmp_path / "to-replace.txt"
+    target.write_text("OLD")
+    backup = str(target) + ".zsnoop-backup-2026-06-04T12:00:00+00:00"
+
+    result = agent.m_restore_file(
+        {
+            "snapshot": mock_mountpoint["snapshot_name"],
+            "snapshot_path": "hello.txt",
+            "target_path": str(target),
+            "overwrite": True,
+            "backup_path": backup,
+        },
+    )
+
+    assert pathlib.Path(backup).read_text() == "OLD"
+    assert target.read_text() == "hello, world!\n"
+    assert result["backup_path"] == backup
+
+
+def test_restore_file_overwrites_without_backup_when_no_backup_path(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """overwrite=True and backup_path=None: old content is just gone."""
+    target = tmp_path / "to-replace.txt"
+    target.write_text("OLD")
+    result = agent.m_restore_file(
+        {
+            "snapshot": mock_mountpoint["snapshot_name"],
+            "snapshot_path": "hello.txt",
+            "target_path": str(target),
+            "overwrite": True,
+            "backup_path": None,
+        },
+    )
+    assert target.read_text() == "hello, world!\n"
+    assert result["backup_path"] is None
+
+
+def test_restore_file_refuses_symlink_source(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """Same symlink discipline as read_file / checksum_file — restore the
+    file the symlink points to directly if that's what the caller wants."""
+    target = tmp_path / "shouldnt-happen"
+    with pytest.raises(agent.PathError, match="symlink"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "sub/link_to_hello",
+                "target_path": str(target),
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+    assert not target.exists()
+
+
+def test_restore_file_refuses_directory_source(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """A directory source isn't a regular file; use restore_dir."""
+    target = tmp_path / "out"
+    with pytest.raises(agent.PathError, match="not a regular file"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "sub",
+                "target_path": str(target),
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+
+
+def test_restore_file_refuses_when_target_parent_missing(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """We don't mkdir -p — the operator stays in control of directory creation."""
+    target = tmp_path / "no-such-dir" / "hello.txt"
+    with pytest.raises(agent.PathError, match="parent does not exist"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",
+                "target_path": str(target),
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+
+
+def test_restore_file_belt_and_braces_rejects_denied_prefix(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    """Even if the server validation were bypassed, the agent re-applies
+    the universal denylist (/proc/sys/dev/.zfs/snapshot)."""
+    with pytest.raises(agent.PathError, match="denied prefix"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",
+                "target_path": "/proc/sysrq-trigger",
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+
+
+def test_restore_file_belt_and_braces_rejects_relative_target(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    with pytest.raises(agent.PathError, match="must be absolute"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",
+                "target_path": "tmp/relative",
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+
+
+# ---- restore_dir (v0.4.0) --------------------------------------------------
+
+
+def test_restore_dir_copies_subtree_preserving_in_tree_symlinks(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """Recursive copy with symlinks=True: an in-tree symlink is preserved
+    as a symlink, not dereferenced into a duplicate copy of its target."""
+    target = tmp_path / "restored-sub"
+    # sub/ contains: nested.txt (file) and link_to_hello (symlink -> ../hello.txt)
+    agent.m_restore_dir(
+        {
+            "snapshot": mock_mountpoint["snapshot_name"],
+            "snapshot_path": "sub",
+            "target_path": str(target),
+            "overwrite": False,
+            "backup_path": None,
+        },
+    )
+    assert target.is_dir()
+    assert (target / "nested.txt").read_text() == "nested content\n"
+    link = target / "link_to_hello"
+    assert link.is_symlink()
+    assert link.readlink() == Path("../hello.txt")
+
+
+def test_restore_dir_refuses_existing_target_without_overwrite(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "sentinel").write_text("don't clobber me")
+    with pytest.raises(agent.PathError, match="already exists"):
+        agent.m_restore_dir(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "sub",
+                "target_path": str(target),
+                "overwrite": False,
+                "backup_path": None,
+            },
+        )
+    # Untouched.
+    assert (target / "sentinel").read_text() == "don't clobber me"
+
+
+def test_restore_dir_overwrites_with_backup_renames_old_tree(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    target = tmp_path / "to-replace-dir"
+    target.mkdir()
+    (target / "old-marker").write_text("old")
+    backup = str(target) + ".zsnoop-backup-2026-06-04T12:00:00+00:00"
+
+    agent.m_restore_dir(
+        {
+            "snapshot": mock_mountpoint["snapshot_name"],
+            "snapshot_path": "sub",
+            "target_path": str(target),
+            "overwrite": True,
+            "backup_path": backup,
+        },
+    )
+
+    # Old tree was renamed to the backup path.
+    assert (pathlib.Path(backup) / "old-marker").read_text() == "old"
+    # New tree is in place at target_path.
+    assert (target / "nested.txt").read_text() == "nested content\n"
+
+
+def test_restore_dir_overwrites_without_backup_removes_old_tree(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    target = tmp_path / "to-replace-dir"
+    target.mkdir()
+    (target / "old-marker").write_text("old")
+    agent.m_restore_dir(
+        {
+            "snapshot": mock_mountpoint["snapshot_name"],
+            "snapshot_path": "sub",
+            "target_path": str(target),
+            "overwrite": True,
+            "backup_path": None,
+        },
+    )
+    # Old content gone, new content present.
+    assert not (target / "old-marker").exists()
+    assert (target / "nested.txt").read_text() == "nested content\n"
+
+
+def test_restore_dir_refuses_when_source_is_not_a_directory(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    target = tmp_path / "out"
+    with pytest.raises(agent.PathError, match="not a directory"):
+        agent.m_restore_dir(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",  # file, not dir
+                "target_path": str(target),
+                "overwrite": False,
+                "backup_path": None,
+            },
         )

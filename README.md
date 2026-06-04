@@ -42,8 +42,10 @@ claude mcp add zsnoop --scope user -- zsnoop-mcp
 
 The agent is streamed over SSH on first connect — nothing needs to be
 installed on the remote host beyond `python3` (3.11+) and the `zfs` CLI.
-Read-only is enforced by an explicit allowlist on the agent side; the
-LLM can't bypass it.
+**Read-only by default**, enforced by an explicit allowlist on the agent
+side. The writable `restore_file` / `restore_dir` tools (v0.4.0+) are
+opt-in per host and bounded by an operator-defined path allowlist; with
+the default config they refuse before doing anything.
 
 ## About this codebase
 
@@ -52,8 +54,11 @@ Code](https://claude.com/claude-code) (Anthropic). The human author (Mark
 Hellewell) defined the architecture, security model, and acceptance
 criteria, and reviewed every change before it landed; Claude handled the
 bulk of the drafting, test scaffolding, refactors, and documentation.
-Read-only-by-construction was a hard requirement from day one, enforced
-by an explicit method allowlist and the test suite — see
+Read-only-by-default was a hard requirement from day one, enforced by an
+explicit method allowlist and the test suite. The opt-in `restore_*` tools
+added in v0.4.0 are the only writable methods and are gated server-side
+on per-host config (off by default; requires a non-empty path allowlist
+when enabled) — see
 [SECURITY.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md). If you're reviewing or auditing the
 code, treat that as context, not as a reason to skip the usual scrutiny.
 
@@ -85,9 +90,14 @@ stdin on each connection — no permanent install required.
 
 ## Tools exposed to the LLM
 
-Designed around three dominant workflows: **file recovery** ("get me /etc/foo
-as it was yesterday"), **config drift audit** ("when did X change?"), and
-**forensics** ("what was on the box when Y broke?").
+Designed around four dominant workflows: **file recovery** ("get me
+/etc/foo as it was yesterday" — to your workstation, or restored in
+place on the server), **config drift audit** ("when did X change?"),
+**forensics** ("what was on the box when Y broke?"), and **storage
+housekeeping** ("which snapshots are biggest / oldest?"). The tools are
+grouped below by their dominant use case; many compose across workflows.
+
+### Discovery & introspection
 
 | Tool                   | What it does                                             |
 | ---------------------- | -------------------------------------------------------- |
@@ -97,28 +107,64 @@ as it was yesterday"), **config drift audit** ("when did X change?"), and
 | `pool_status`          | Parsed `zpool status`: vdev tree, scrub, errors          |
 | `list_datasets`        | Filesystems and volumes                                  |
 | `dataset_properties`   | `zfs get` (all or filtered) with values + sources        |
-| `list_snapshots`       | Snapshots (optionally scoped to a dataset, recursive)    |
-| `snapshot_cadence`     | Snapshot inventory summary: counts by class, biggest gap |
-| `diff_snapshots`       | Path-level diff between two snapshots                    |
+
+### Snapshot inventory & housekeeping
+
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
+| `list_snapshots`       | Snapshots (optional dataset/time/cap filters)            |
+| `snapshot_cadence`     | Summary: counts by class, gap (per-dataset), span        |
+| `stale_snapshots`      | Snapshots older than a time phrase, sorted by uniqueness |
+| `size_delta`           | Bytes written between two snapshots of one dataset       |
+
+### Browsing & sizing within a snapshot
+
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
 | `list_dir`             | Bounded directory listing within a snapshot              |
 | `size_breakdown`       | Recursive bytes for a snapshot dir + per-child sizes     |
 | `top_consumers`        | Top-N largest files/dirs under a snapshot subtree        |
+
+### Reading content
+
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
 | `read_file`            | Bounded read; UTF-8 or base64 for binary                 |
 | `find_files`           | `fnmatch` name search inside a snapshot                  |
 | `content_grep`         | Regex content search inside a snapshot                   |
+| `checksum_file`        | Full-file SHA-256 (256 MiB cap) for integrity checks     |
+
+### Comparing snapshots & tracing change
+
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
+| `diff_snapshots`       | Path-level diff between two snapshots                    |
+| `file_diff`            | Unified diff of one file across two snapshots            |
 | `file_history`         | Every snapshot's version of a given file in a dataset    |
 | `versions_of`          | `file_history` deduped by hash (distinct versions only)  |
-| `file_diff`            | Unified diff of one file across two snapshots            |
 | `snapshots_containing` | Snapshots in which a path currently exists (time-ranged) |
 | `first_appearance`     | Earliest snapshot containing a path                      |
 | `last_appearance`      | Latest snapshot containing a path; reveals when deleted  |
 | `find_deleted`         | Paths deleted between two snapshots in a time window     |
 | `bisect_change`        | Binary-search for the snapshot where a predicate flips   |
-| `stale_snapshots`      | Snapshots older than a time phrase, sorted by uniqueness |
-| `size_delta`           | Bytes written between two snapshots of one dataset       |
-| `checksum_file`        | Full-file SHA-256 (256 MiB cap) for integrity checks     |
+
+### Recovery — copy out to your workstation
+
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
 | `fetch_file`           | Copy a snapshot file to a local path via SFTP            |
 | `fetch_dir`            | Copy a snapshot directory tree to a local path via SFTP  |
+
+### Recovery — restore in place on the server (opt-in, v0.4.0+)
+
+These are the only **writable** tools. Disabled per host by default;
+require `allow_restore = true` and a non-empty `restore_paths` allowlist
+in `hosts.toml`. See [SECURITY.md](https://github.com/hamsolodev/zsnoop-mcp/blob/main/docs/SECURITY.md) for the threat model.
+
+| Tool                   | What it does                                             |
+| ---------------------- | -------------------------------------------------------- |
+| `restore_file`         | Restore a snapshot file to a server path (opt-in)        |
+| `restore_dir`          | Restore a snapshot directory tree to a server path       |
 
 Time-range parameters accept ISO 8601 *or* human phrases — `yesterday`,
 `last week`, `3 days ago`, `2 hours ago`, etc. Parsing happens locally; the
