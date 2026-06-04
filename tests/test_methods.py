@@ -6,6 +6,7 @@ import base64
 import hashlib
 import os
 import pathlib
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1511,7 +1512,7 @@ def test_restore_file_copies_to_target_preserving_content_and_mode(
             "snapshot_path": "hello.txt",
             "target_path": str(target),
             "overwrite": False,
-            "backup_path": None,
+            "backup": False,
         },
     )
 
@@ -1535,7 +1536,7 @@ def test_restore_file_refuses_existing_target_without_overwrite(
                 "snapshot_path": "hello.txt",
                 "target_path": str(existing),
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
     # Untouched.
@@ -1545,11 +1546,12 @@ def test_restore_file_refuses_existing_target_without_overwrite(
 def test_restore_file_overwrites_with_atomic_backup(
     mock_mountpoint: dict[str, Any], tmp_path: Path
 ) -> None:
-    """Backup-then-replace: the existing file lands at backup_path,
-    the restored content lands at target_path."""
+    """Backup-then-replace: the existing file lands at the
+    agent-computed ``<target>.zsnoop-backup-<UTC-isoformat>`` path; the
+    restored content lands at target_path. The agent owns the timestamp
+    (it knows the remote clock); the server only forwards ``backup=True``."""
     target = tmp_path / "to-replace.txt"
     target.write_text("OLD")
-    backup = str(target) + ".zsnoop-backup-2026-06-04T12:00:00+00:00"
 
     result = agent.m_restore_file(
         {
@@ -1557,13 +1559,18 @@ def test_restore_file_overwrites_with_atomic_backup(
             "snapshot_path": "hello.txt",
             "target_path": str(target),
             "overwrite": True,
-            "backup_path": backup,
+            "backup": True,
         },
     )
 
-    assert pathlib.Path(backup).read_text() == "OLD"
+    backup_path = result["backup_path"]
+    assert backup_path is not None
+    assert backup_path.startswith(f"{target}.zsnoop-backup-")
+    # The agent's ISO 8601 timestamp suffix must round-trip and carry tzinfo.
+    suffix = backup_path.split(".zsnoop-backup-", 1)[1]
+    assert datetime.fromisoformat(suffix).tzinfo is not None
+    assert pathlib.Path(backup_path).read_text() == "OLD"
     assert target.read_text() == "hello, world!\n"
-    assert result["backup_path"] == backup
 
 
 def test_restore_file_overwrites_without_backup_when_no_backup_path(
@@ -1578,7 +1585,7 @@ def test_restore_file_overwrites_without_backup_when_no_backup_path(
             "snapshot_path": "hello.txt",
             "target_path": str(target),
             "overwrite": True,
-            "backup_path": None,
+            "backup": False,
         },
     )
     assert target.read_text() == "hello, world!\n"
@@ -1598,7 +1605,7 @@ def test_restore_file_refuses_symlink_source(
                 "snapshot_path": "sub/link_to_hello",
                 "target_path": str(target),
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
     assert not target.exists()
@@ -1616,7 +1623,7 @@ def test_restore_file_refuses_directory_source(
                 "snapshot_path": "sub",
                 "target_path": str(target),
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
 
@@ -1633,7 +1640,7 @@ def test_restore_file_refuses_when_target_parent_missing(
                 "snapshot_path": "hello.txt",
                 "target_path": str(target),
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
 
@@ -1650,7 +1657,7 @@ def test_restore_file_belt_and_braces_rejects_denied_prefix(
                 "snapshot_path": "hello.txt",
                 "target_path": "/proc/sysrq-trigger",
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
 
@@ -1665,7 +1672,7 @@ def test_restore_file_belt_and_braces_rejects_relative_target(
                 "snapshot_path": "hello.txt",
                 "target_path": "tmp/relative",
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
 
@@ -1686,7 +1693,7 @@ def test_restore_dir_copies_subtree_preserving_in_tree_symlinks(
             "snapshot_path": "sub",
             "target_path": str(target),
             "overwrite": False,
-            "backup_path": None,
+            "backup": False,
         },
     )
     assert target.is_dir()
@@ -1709,7 +1716,7 @@ def test_restore_dir_refuses_existing_target_without_overwrite(
                 "snapshot_path": "sub",
                 "target_path": str(target),
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
             },
         )
     # Untouched.
@@ -1719,23 +1726,30 @@ def test_restore_dir_refuses_existing_target_without_overwrite(
 def test_restore_dir_overwrites_with_backup_renames_old_tree(
     mock_mountpoint: dict[str, Any], tmp_path: Path
 ) -> None:
+    """Backup-then-replace for directories: the agent computes
+    ``<target>.zsnoop-backup-<UTC-isoformat>`` with its own clock and
+    renames the existing tree there before writing the new one in place."""
     target = tmp_path / "to-replace-dir"
     target.mkdir()
     (target / "old-marker").write_text("old")
-    backup = str(target) + ".zsnoop-backup-2026-06-04T12:00:00+00:00"
 
-    agent.m_restore_dir(
+    result = agent.m_restore_dir(
         {
             "snapshot": mock_mountpoint["snapshot_name"],
             "snapshot_path": "sub",
             "target_path": str(target),
             "overwrite": True,
-            "backup_path": backup,
+            "backup": True,
         },
     )
 
+    backup_path = result["backup_path"]
+    assert backup_path is not None
+    assert backup_path.startswith(f"{target}.zsnoop-backup-")
+    suffix = backup_path.split(".zsnoop-backup-", 1)[1]
+    assert datetime.fromisoformat(suffix).tzinfo is not None
     # Old tree was renamed to the backup path.
-    assert (pathlib.Path(backup) / "old-marker").read_text() == "old"
+    assert (pathlib.Path(backup_path) / "old-marker").read_text() == "old"
     # New tree is in place at target_path.
     assert (target / "nested.txt").read_text() == "nested content\n"
 
@@ -1752,7 +1766,7 @@ def test_restore_dir_overwrites_without_backup_removes_old_tree(
             "snapshot_path": "sub",
             "target_path": str(target),
             "overwrite": True,
-            "backup_path": None,
+            "backup": False,
         },
     )
     # Old content gone, new content present.
@@ -1771,6 +1785,67 @@ def test_restore_dir_refuses_when_source_is_not_a_directory(
                 "snapshot_path": "hello.txt",  # file, not dir
                 "target_path": str(target),
                 "overwrite": False,
-                "backup_path": None,
+                "backup": False,
+            },
+        )
+
+
+def test_restore_file_refuses_existing_directory_target(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """Even with overwrite=True, a directory at target_path is refused —
+    replacing a directory tree with a single file is almost always a typo.
+    This check used to live server-side; moved here when existence checks
+    moved to the agent (the only side with knowledge of the remote FS)."""
+    target_dir = tmp_path / "existing-dir"
+    target_dir.mkdir()
+    with pytest.raises(agent.PathError, match="is a directory"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",
+                "target_path": str(target_dir),
+                "overwrite": True,
+                "backup": False,
+            },
+        )
+
+
+def test_restore_dir_refuses_existing_file_target(
+    mock_mountpoint: dict[str, Any], tmp_path: Path
+) -> None:
+    """Symmetric to the above — refuse an existing *file* at target_path
+    explicitly, instead of letting shutil.rmtree raise NotADirectoryError
+    further down with a confusing message. (PR #17 review.)"""
+    target_file = tmp_path / "existing-file.txt"
+    target_file.write_text("don't replace me with a directory tree")
+    with pytest.raises(agent.PathError, match="is a file"):
+        agent.m_restore_dir(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "sub",
+                "target_path": str(target_file),
+                "overwrite": True,
+                "backup": False,
+            },
+        )
+    # The existing file must be untouched on the rejection path.
+    assert target_file.read_text() == "don't replace me with a directory tree"
+
+
+def test_restore_file_belt_and_braces_rejects_newline_in_target(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    """The server rejects \\n/\\r/NUL in target_path; the agent applies the
+    same check independently so a directly-invoked agent honours the same
+    invariant. (Previously only NUL was rejected agent-side — PR #17 review.)"""
+    with pytest.raises(agent.PathError, match="newline"):
+        agent.m_restore_file(
+            {
+                "snapshot": mock_mountpoint["snapshot_name"],
+                "snapshot_path": "hello.txt",
+                "target_path": "/tmp/foo\nbar",  # noqa: S108 - hardcoded path only used to trigger the rejection
+                "overwrite": False,
+                "backup": False,
             },
         )

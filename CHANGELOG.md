@@ -58,6 +58,37 @@ explicit per-host opt-in.
   from `_no_mutating_operations`) clarifies that the forbidden set
   covers mutating ZFS *subcommands*; the writable restore methods use
   `shutil`, not `zfs`, and are gated by server config.
+- **Pre-release hardening from the PR #17 review** (Copilot caught a
+  real bug + an architectural inconsistency before tag):
+  - **Existence checks and backup-path timestamp moved from the server
+    to the agent.** The server was doing `Path.exists()` / `Path.is_dir()`
+    on `target_path` — but that's a *remote* path; the server was
+    checking its own local filesystem. With `backup=True` and an
+    existing remote target, a server whose local FS happened not to
+    have that path would skip `backup_path` computation and the agent
+    would overwrite *without* the requested backup. The server now
+    forwards `overwrite` and `backup` as intent flags only; the agent
+    does the existence checks and computes its own ISO 8601 backup-path
+    timestamp.
+  - **Server canonicalisation switched from `Path.resolve()` to
+    `posixpath.normpath`** for the same wrong-machine reason — a local
+    symlink at the same path as the remote target could either follow
+    an unrelated local link (rejecting a valid restore) or miss a
+    remote symlink escape. Symlink-escape resistance properly belongs
+    on the agent, where the symlinks actually exist; the server now
+    does pure-string `..` / `.` / `//` collapsing.
+  - **Agent's belt-and-braces target validation** now rejects
+    `\n` / `\r` / NUL (was NUL-only), matching the server's invariant
+    so a directly-invoked agent honours the same contract.
+  - **`m_restore_dir` now explicitly refuses a non-directory existing
+    target** with a clear error, rather than falling through to
+    `shutil.rmtree` which raised `NotADirectoryError` further down.
+    Symmetric with `m_restore_file`'s existing refusal of directory
+    targets, and load-bearing now that this check has moved from
+    server to agent.
+  - **README intro and USAGE.md** corrected — the README still said
+    "No mutation operations are ever exposed" near the top, and USAGE
+    said `restore_file` "is the only writable tool" (singular).
 
 ## [0.3.1] — 2026-05-28
 
