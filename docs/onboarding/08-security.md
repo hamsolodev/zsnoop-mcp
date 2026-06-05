@@ -25,16 +25,29 @@ Out of scope:
   (We're a subset of what they can already do.)
 - SSH key compromise.
 
-## How — the six guarantees
+## How — the guarantees
 
-### G1 — No mutation operations are ever exposed
+### G1 — No mutation operations *by default*; restore is opt-in per host
 
 Enforced by an explicit `METHODS` dict in
-[`agent/zfs_snoop_agent.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py); only
-read-only methods present. Tested by
-[`test_methods_table_contains_no_mutating_operations`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_dispatch.py)
-which asserts that no name matching common destructive zfs verbs (destroy,
-snapshot, rollback, send, mount, …) ever leaks in.
+[`agent/zfs_snoop_agent.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py).
+The 27 read-only methods are always present. The two writable methods
+added in v0.4.0 (`restore_file`, `restore_dir`) are in the dispatch
+table too, but the **server** refuses to call them unless the target
+host has `allow_restore = true` *and* a non-empty `restore_paths`
+allowlist in `hosts.toml` — stock installs of any pre-0.4.0 host
+configuration stay strictly read-only after upgrade. See
+[Security model — G7](../SECURITY.md) for the full restore validation
+flow (universal denylist, canonicalisation before allowlist match,
+backup semantics).
+
+Tested by
+[`test_methods_table_contains_no_mutating_zfs_operations`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_dispatch.py)
+(renamed in 0.4.0 — the forbidden set covers ZFS *subcommand* verbs
+like `destroy`, `rollback`, `set`, `clone`; the `restore_*` methods use
+`shutil`, not `zfs`, and are application-level), and by
+`test_restore_file_rejects_when_allow_restore_disabled` which pins the
+server gating.
 
 ### G2 — No shell interpretation of user input
 
@@ -125,7 +138,8 @@ Use sparingly. Default to user mode. Full discussion in
 When reviewing a change that touches a tool or method:
 
 - [ ] Is any new RPC method added to the agent's `METHODS` dict
-  read-only? (G1)
+  read-only? If it writes, is it gated server-side on per-host
+  operator config (`allow_restore` + `restore_paths` pattern)? (G1/G7)
 - [ ] Does any new dataset/snapshot/path input route through the
   validators before it touches `subprocess` or the filesystem? (G2/G3)
 - [ ] Does any new read have a default bound and a hard cap? (G4)

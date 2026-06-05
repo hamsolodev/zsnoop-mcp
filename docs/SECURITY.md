@@ -60,7 +60,7 @@ the only methods that write to the host's live filesystem and they are
 `restore_dir` tools refuse before invoking the agent unless the host has
 `allow_restore = true` and a non-empty `restore_paths` allowlist in
 `hosts.toml`. Default install of any pre-existing host is unaffected.
-See [G7](#g7--restore-targets-are-bounded-by-an-operator-path-allowlist)
+See [G7](#g7-restore-targets-are-bounded-by-an-operator-path-allowlist)
 for the target-path bounds.
 
 Tests: `test_methods_table_contains_no_mutating_zfs_operations` asserts
