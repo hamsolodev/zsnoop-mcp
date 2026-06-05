@@ -29,8 +29,11 @@ cat last-week-friday/.config/foo.toml        # 4. read it
 With MCP wiring, you ask "what did `foo.toml` look like last week?" in your
 AI assistant, and the model uses the right tools (`snapshots_containing`,
 `read_file`) to do the job in one round-trip. The reason that's *safe* is
-that the tools are read-only by construction — the agent's dispatch table
-has no `destroy`, no `snapshot`, no `rollback` (see
+that the tools are **read-only by default** — the agent's dispatch table
+has no `destroy`, no `snapshot`, no `rollback`. The two writable methods
+added in v0.4.0 (`restore_file` / `restore_dir`) are opt-in per host and
+gated by a mandatory operator-defined path allowlist; with the stock
+config nothing on the remote can be written (see
 [Security model](08-security.md)).
 
 ## How — three layers

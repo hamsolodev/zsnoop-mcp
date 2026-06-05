@@ -1,5 +1,5 @@
 site_name: zsnoop-mcp
-site_description: Read-only ZFS snapshot exploration over MCP
+site_description: ZFS snapshot exploration and recovery over MCP (read-only by default; opt-in restore)
 # Repository URL surfaces in the Material theme's top-right "fork me" link.
 # Override at build time if needed:
 #   ZSNOOP_REPO_URL=https://your-host/your-org/zsnoop-mcp uv run mkdocs build

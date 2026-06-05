@@ -24,10 +24,11 @@ and Python decodes and `exec()`s it. Zero install.
 
 ## How — guided tour
 
-### Method allowlist (G1 — read-only by construction)
+### Method allowlist (G1 — read-only by default)
 
 The whole reason we trust this thing is the `METHODS` dict in
-[agent/zfs_snoop_agent.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py):
+[agent/zfs_snoop_agent.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py)
+(abbreviated):
 
 ```python
 METHODS: Final[dict[str, Any]] = {
@@ -44,14 +45,27 @@ METHODS: Final[dict[str, Any]] = {
     "snapshots_containing": m_snapshots_containing,
     "first_appearance": m_first_appearance,
     "size_delta": m_size_delta,
+    # ... (full list in the source — 27 read-only methods total)
+    # v0.4.0 added two writable methods; see below.
+    "restore_file": m_restore_file,
+    "restore_dir": m_restore_dir,
 }
 ```
 
-Every one of those is read-only. There is **no configuration knob** that
-adds a method to this dict. To add `destroy_pool`, you'd have to edit the
-source and re-deploy — and a test in
-[tests/test_dispatch.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_dispatch.py) asserts that no
-common mutation name ever appears in the table.
+There is **no configuration knob** that adds a method to this dict. To
+add `destroy_pool`, you'd have to edit the source and re-deploy — and a
+test in
+[tests/test_dispatch.py](https://github.com/hamsolodev/zsnoop-mcp/blob/main/tests/test_dispatch.py)
+asserts that no mutating ZFS *subcommand* name (`destroy`, `rollback`,
+`set`, `clone`, …) ever appears in the table.
+
+The two `restore_*` methods are the project's only writable operations;
+they use `shutil` rather than `zfs`, and crucially they are **gated
+server-side** on a per-host opt-in (`HostConfig.allow_restore = true` +
+a non-empty `restore_paths` allowlist). On any host that hasn't opted
+in, the server's `restore_file` / `restore_dir` tools refuse before the
+agent is even invoked — so the agent's writable methods are inert by
+default. See [Security model — G7](08-security.md).
 
 ### JSON-RPC over NDJSON
 

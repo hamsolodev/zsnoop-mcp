@@ -3,7 +3,9 @@
 ## What
 
 [`src/zsnoop_mcp/server.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/src/zsnoop_mcp/server.py) — registers
-every read-only operation as a FastMCP tool, validates host names,
+every agent method as a FastMCP tool (27 read-only operations plus, from
+v0.4.0, the two opt-in writable `restore_*` tools), validates host names
+and snapshot/path inputs, gates restore on per-host operator config,
 translates human time phrases, and maps exceptions to MCP error responses.
 
 ## Why this layer exists
@@ -78,11 +80,13 @@ The `INSTRUCTIONS` string is the server's free-form preamble to the LLM:
 
 ```python
 INSTRUCTIONS = (
-    "Read-only exploration of ZFS snapshots on remote hosts over SSH. "
-    "All operations are scoped to a host configured by the operator. "
-    "Use `list_hosts` first to see what's reachable; pass `host` to every "
-    "other tool. Time-range parameters accept ISO 8601 or human phrases "
-    "like 'yesterday', 'last week', '3 days ago'."
+    "Exploration and recovery of ZFS snapshots on remote hosts over SSH. "
+    "Read-only by default; the writable `restore_file` / `restore_dir` "
+    "tools are opt-in per host (operator config) and will refuse on hosts "
+    "that haven't opted in. All operations are scoped to a host configured "
+    "by the operator. Use `list_hosts` first to see what's reachable; pass "
+    "`host` to every other tool. Time-range parameters accept ISO 8601 or "
+    "human phrases like 'yesterday', 'last week', '3 days ago'."
 )
 ```
 
