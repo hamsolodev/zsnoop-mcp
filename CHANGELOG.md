@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-05
+
+Docs-and-runtime-strings patch. Several places still framed the project
+as absolutely read-only after the 0.4.0 reframe — most notably the
+runtime `INSTRUCTIONS` string shown to every connecting LLM. No code
+behaviour or API changes; agent version bumped to 0.4.1.
+
+### Fixed
+
+- **Runtime `INSTRUCTIONS` string** (`src/zsnoop_mcp/server.py`) — the
+  server's self-description shown to every LLM client at connection
+  time still opened with *"Read-only exploration of ZFS snapshots…"*,
+  which actively misled models about the availability of the `restore_*`
+  tools (a model reading this could reasonably conclude restore wasn't
+  supported). Now leads with *"Exploration and recovery…"* and
+  explicitly notes the per-host opt-in.
+- **Docs site landing page** (`docs/index.md`) — same subtitle the
+  README had before PR #18; updated to match.
+- **`mkdocs.yml` `site_description`** — used in the rendered HTML
+  `<meta>` tag and the browser tab; was still *"Read-only ZFS snapshot
+  exploration over MCP"*.
+- **Onboarding tutorial** — chapters `01-what.md`, `02-agent.md` (G1
+  section), `04-server.md`, and `08-security.md` (G1 section) still
+  used absolute read-only framing (*"read-only by construction"*,
+  *"Every one of those is read-only. There is no configuration knob…"*).
+  All reframed to "read-only by default" with cross-references to G7 and
+  the restore-gating mechanism. `02-agent.md`'s abbreviated `METHODS`
+  dict snippet gains the two restore methods plus an annotation noting
+  the abbreviation. `08-security.md` also picks up the renamed test
+  (`test_methods_table_contains_no_mutating_zfs_operations`) and a
+  review-checklist tweak.
+- **Broken anchor in `SECURITY.md` G1 → G7 cross-reference** — was
+  using a double-hyphen anchor (markdownlint's em-dash slug) but
+  mkdocs (which builds the deployed site) drops em-dashes entirely,
+  so the link resolved to nothing on the live page. Switched to the
+  mkdocs single-hyphen form; `mkdocs build --strict` is now clean.
+
 ## [0.4.0] — 2026-06-04
 
 First release with **writable** tools. Read-only-by-default is preserved
@@ -422,7 +459,9 @@ Initial public release.
 - PII scrubbed from example values throughout the repo and from git
   history.
 
-[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.1
+[0.4.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.0
 [0.3.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.2.0
