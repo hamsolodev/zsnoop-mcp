@@ -65,7 +65,7 @@ server-side** on a per-host opt-in (`HostConfig.allow_restore = true` +
 a non-empty `restore_paths` allowlist). On any host that hasn't opted
 in, the server's `restore_file` / `restore_dir` tools refuse before the
 agent is even invoked — so the agent's writable methods are inert by
-default. See [Security model — G7](08-security.md).
+default. See [Security model — G7](../SECURITY.md#g7-restore-targets-are-bounded-by-an-operator-path-allowlist).
 
 ### JSON-RPC over NDJSON
 

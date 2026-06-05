@@ -80,13 +80,15 @@ The `INSTRUCTIONS` string is the server's free-form preamble to the LLM:
 
 ```python
 INSTRUCTIONS = (
-    "Exploration and recovery of ZFS snapshots on remote hosts over SSH. "
-    "Read-only by default; the writable `restore_file` / `restore_dir` "
-    "tools are opt-in per host (operator config) and will refuse on hosts "
-    "that haven't opted in. All operations are scoped to a host configured "
-    "by the operator. Use `list_hosts` first to see what's reachable; pass "
-    "`host` to every other tool. Time-range parameters accept ISO 8601 or "
-    "human phrases like 'yesterday', 'last week', '3 days ago'."
+    "Exploration and recovery of ZFS snapshots on configured hosts. "
+    "Each host is reached over SSH or, when configured, as a local "
+    "subprocess on the same machine as this server. Read-only by "
+    "default; the writable `restore_file` / `restore_dir` tools are "
+    "opt-in per host (operator config) and will refuse on hosts that "
+    "haven't opted in. All operations are scoped to a host configured "
+    "by the operator. Use `list_hosts` first to see what's reachable; "
+    "pass `host` to every other tool. Time-range parameters accept ISO "
+    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'."
 )
 ```
 
