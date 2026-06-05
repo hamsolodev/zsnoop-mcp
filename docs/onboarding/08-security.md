@@ -37,7 +37,7 @@ table too, but the **server** refuses to call them unless the target
 host has `allow_restore = true` *and* a non-empty `restore_paths`
 allowlist in `hosts.toml` — stock installs of any pre-0.4.0 host
 configuration stay strictly read-only after upgrade. See
-[Security model — G7](../SECURITY.md) for the full restore validation
+[Security model — G7](../SECURITY.md#g7-restore-targets-are-bounded-by-an-operator-path-allowlist) for the full restore validation
 flow (universal denylist, canonicalisation before allowlist match,
 backup semantics).
 
