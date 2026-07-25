@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "zsnoop-mcp"
-version = "0.4.1"
+dynamic = ["version"]
 description = "MCP server for ZFS snapshot exploration and recovery on remote hosts over SSH (read-only by default, opt-in restore; AI-assisted)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,6 +40,7 @@ Changelog = "https://github.com/hamsolodev/zsnoop-mcp/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
+    "hatch-vcs>=0.3",
     "mypy>=1.11",
     "pip-audit>=2.7",
     "pre-commit>=3.8",
@@ -64,6 +65,17 @@ packages = ["src/zsnoop_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "agent/zfs_snoop_agent.py" = "zsnoop_mcp/_agent_source/zfs_snoop_agent.py"
+
+# hatch-vcs: version derived from git tags (vX.Y.Z -> X.Y.Z).
+# Requires fetch-depth: 0 in CI so the full tag history is available.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.build-source]
+path = "src/zsnoop_mcp/__init__.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 # ---------------------------------------------------------------------------
 # Ruff: lint + format. Single source of truth for style.
