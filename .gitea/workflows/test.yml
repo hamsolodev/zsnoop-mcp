@@ -1,0 +1,62 @@
+name: Test
+
+on:
+  push:
+    branches: [main, '**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs needs full tag history to resolve version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dev dependencies
+        run: uv sync --group dev
+
+      - name: Confirm Python version used by uv
+        # Belt-and-braces: print the active Python so future
+        # matrix-misfires are visible in the log instead of silent
+        # like the first time.
+        run: uv run python --version
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: ruff format (check only)
+        run: uv run ruff format --check
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: pytest
+        run: uv run pytest -q
+
+      - name: pip-audit (CVE scan of locked deps)
+        run: uv run pip-audit --skip-editable
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync docs dependencies
+        run: uv sync --group docs
+
+      - name: mkdocs build --strict
+        run: uv run mkdocs build --strict

@@ -1,0 +1,56 @@
+name: Publish to Gitea PyPI
+
+# Build the zsnoop-mcp package and publish the wheel to the private
+# Gitea PyPI registry. Never public PyPI via this path — the package
+# is installed locally by end users.
+#
+# Requires a repo secret PYPI_UPLOAD_TOKEN = a Gitea token with
+# **package write** scope (use a dedicated token; do not reuse a PAT).
+#
+# Each tag is a new hatch-vcs version, so uploads never collide
+# (Gitea's registry rejects duplicates and twine --skip-existing
+# is unsupported).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs resolves version from tags/history
+
+      - name: Set up Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+
+      - name: Test the package
+        run: |
+          uv sync --group dev
+          uv run pytest -q
+
+      - name: Build the wheel
+        run: |
+          # Wheel ONLY — the sdist builds incorrectly out-of-tree
+          # (hatch-vcs can't resolve the version without .git).
+          # A pure-Python wheel is all the private registry needs.
+          uv build
+
+      - name: Verify the agent is force-included in the wheel
+        run: |
+          set -eo pipefail
+          wheel=$(ls dist/zsnoop_mcp-*.whl)
+          unzip -l "$wheel" | grep -q "zsnoop_mcp/_agent_source/zfs_snoop_agent.py" \
+            || { echo "ERROR: agent script not present in wheel" >&2; exit 1; }
+
+      - name: Publish to the Gitea PyPI registry
+        env:
+          TWINE_USERNAME: mch
+          TWINE_PASSWORD: ${{ secrets.PYPI_UPLOAD_TOKEN }}
+        run: |
+          twine upload --repository-url https://git.svc.home.tropism.net/api/packages/mch/pypi dist/*.whl
