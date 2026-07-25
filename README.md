@@ -179,7 +179,7 @@ agent only sees absolute ISO 8601 timestamps.
 ### From PyPI (recommended)
 
 ```sh
-uv tool install zsnoop-mcp    # or: pipx install zsnoop-mcp / pip install zsnoop-mcp
+uv tool install zsnoop-mcp
 ```
 
 Run it with `zsnoop-mcp`.
