@@ -8,13 +8,17 @@ name: Publish to Gitea PyPI
 # **package write** scope (use a dedicated token; do not reuse a PAT).
 #
 # Each tag is a new hatch-vcs version, so uploads never collide
-# (Gitea's registry rejects duplicates and twine --skip-existing
-# is unsupported).
+# (Gitea's registry rejects duplicate filenames outright).
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+
+env:
+  # See the matching note in test.yml: reflinks fail with EAGAIN on the
+  # ZFS-backed runners, so make uv copy rather than clone/hardlink.
+  UV_LINK_MODE: copy
 
 jobs:
   publish:
@@ -28,6 +32,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: '3.12'
+          enable-cache: false  # no cache service on self-hosted runners (see swarm-stacks#27)
 
       - name: Test the package
         run: |
@@ -36,10 +41,11 @@ jobs:
 
       - name: Build the wheel
         run: |
-          # Wheel ONLY — the sdist builds incorrectly out-of-tree
-          # (hatch-vcs can't resolve the version without .git).
-          # A pure-Python wheel is all the private registry needs.
-          uv build
+          # Wheel ONLY — a pure-Python wheel is all the private registry
+          # needs, and building it straight from the checkout keeps
+          # hatch-vcs reading the version from .git rather than from an
+          # intermediate sdist.
+          uv build --wheel
 
       - name: Verify the agent is force-included in the wheel
         run: |
@@ -50,7 +56,10 @@ jobs:
 
       - name: Publish to the Gitea PyPI registry
         env:
-          TWINE_USERNAME: mch
-          TWINE_PASSWORD: ${{ secrets.PYPI_UPLOAD_TOKEN }}
-        run: |
-          twine upload --repository-url https://git.svc.home.tropism.net/api/packages/mch/pypi dist/*.whl
+          # `uv publish` rather than twine: twine is not in the runner image
+          # and is not a project dependency, so the previous step could only
+          # ever exit 127. uv is already on PATH from setup-uv.
+          UV_PUBLISH_URL: https://git.svc.home.tropism.net/api/packages/mch/pypi
+          UV_PUBLISH_USERNAME: mch
+          UV_PUBLISH_PASSWORD: ${{ secrets.PYPI_UPLOAD_TOKEN }}
+        run: uv publish dist/*.whl

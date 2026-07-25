@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # The self-hosted runners use Docker's `zfs` storage driver. On the runner
+  # host with OpenZFS >= 2.2 (block cloning enabled) uv detects reflink
+  # support and copies from its cache with FICLONE — which ZFS refuses with
+  # EAGAIN ("Resource temporarily unavailable") while the source blocks are
+  # still dirty, i.e. exactly when uv has just downloaded them. uv treats
+  # that as fatal instead of falling back, so a cold-cache `uv sync` dies
+  # with "Failed to clone ... (os error 11)". Plain copies avoid reflinks and
+  # hardlinks entirely; uv itself recommends this setting for such layouts.
+  UV_LINK_MODE: copy
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
