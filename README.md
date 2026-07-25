@@ -27,7 +27,7 @@ written.
 
 ```sh
 # 1. Install
-uv tool install zsnoop-mcp        # or: pipx install zsnoop-mcp
+uv tool install zsnoop-mcp
 
 # 2. Configure one host (more in docs/INSTALL.md)
 mkdir -p ~/.config/zsnoop-mcp
