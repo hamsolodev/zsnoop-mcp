@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-25
+
+Patch release. Switched from hardcoded version to dynamic versioning via
+hatch-vcs (version derived from git tags). Added Gitea CI workflows
+(test + publish) for private PyPI registry. Upgraded vulnerable deps.
+Fixed stale version references and method counts across docs.
+
+### Changed
+
+- **Dynamic versioning**: `pyproject.toml` now uses `hatch-vcs` to derive
+  version from the nearest git tag (`v0.4.1` → `0.4.1`). No manual
+  version bump needed — just tag and push.
+- **Gitea CI**: Added `.gitea/workflows/test.yml` (lint + format + mypy +
+  pytest + pip-audit + docs) and `publish.yml` (wheel build + twine upload
+  to private Gitea PyPI).
+- **Dependency upgrades**: cryptography → 49.0.0, mcp → 1.28.1, msgpack
+  → 1.2.1, pydantic-settings → 2.14.2, python-multipart → 0.0.32,
+  starlette → 1.3.1, pip → 26.1.2, pymdown-extensions → 11.0.1.
+
+### Fixed
+
+- **Stale `__version__`**: `src/zsnoop_mcp/__init__.py` now reads version
+  from `importlib.metadata` instead of a hardcoded string.
+- **Docs correctness**: Fixed hardcoded wheel version in onboarding,
+  method count (27 → 25 read-only), and "no mutation operations" wording
+  in index.md.
+
 ## [0.4.1] — 2026-06-05
 
 Docs-and-runtime-strings patch. Several places still framed the project
