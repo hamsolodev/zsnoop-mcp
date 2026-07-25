@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-07-25
+
+Patch release. CI-only: the 0.4.1 workflows could not complete, so this is
+the first version actually built and published to the private registry.
+
+### Fixed
+
+- **`uv sync` failing on the ZFS-backed runners**: the runners use Docker's
+  `zfs` storage driver, and on the host running OpenZFS >= 2.2 (block
+  cloning enabled) uv copies from its cache with `FICLONE`. ZFS answers
+  `EAGAIN` while the source blocks are still dirty — precisely the case for
+  a just-downloaded wheel — and uv treats that as fatal rather than falling
+  back, so a cold-cache sync died with `Failed to clone ... (os error 11)`.
+  Both workflows now set `UV_LINK_MODE=copy`.
+- **Publish step exiting 127**: the upload used `twine`, which is neither in
+  the runner image nor a project dependency. Replaced with `uv publish`.
+- **Wheel build**: `uv build --wheel` rather than `uv build`, which had been
+  building an sdist and then the wheel from it, contrary to the workflow's
+  stated wheel-only intent.
+
 ## [0.4.1] — 2026-07-25
 
 Patch release. Switched from hardcoded version to dynamic versioning via
@@ -486,7 +506,8 @@ Initial public release.
 - PII scrubbed from example values throughout the repo and from git
   history.
 
-[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.2
 [0.4.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.0
 [0.3.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.3.1
