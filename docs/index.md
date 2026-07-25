@@ -13,7 +13,8 @@ read-only by default, with opt-in `restore_*` tools (v0.4.0+) gated per host.
 
 Browse, diff, search, and read files from any snapshot on any of your ZFS
 hosts through your AI assistant, over a single persistent SSH connection per
-host. No mutation operations are ever exposed.
+host. Read-only by default; `restore_file` / `restore_dir` are opt-in per host
+(v0.4.0+).
 
 ## What lives in these docs
 

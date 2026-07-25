@@ -48,7 +48,7 @@ recommended pattern.
 ```sh
 rm -rf dist/
 uv build
-unzip -l dist/zsnoop_mcp-0.1.0-py3-none-any.whl
+unzip -l dist/zsnoop_mcp-*.whl
 ```
 
 The wheel should contain:
@@ -61,7 +61,7 @@ zsnoop_mcp/config.py
 zsnoop_mcp/server.py
 zsnoop_mcp/timeparse.py
 zsnoop_mcp/transport.py
-zsnoop_mcp-0.1.0.dist-info/...
+zsnoop_mcp-*.dist-info/...
 ```
 
 If `_agent_source/zfs_snoop_agent.py` is missing, `find_agent_source()`

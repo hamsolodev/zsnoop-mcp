@@ -3,7 +3,7 @@
 ## What
 
 [`src/zsnoop_mcp/server.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/src/zsnoop_mcp/server.py) — registers
-every agent method as a FastMCP tool (27 read-only operations plus, from
+every agent method as a FastMCP tool (25 read-only operations plus, from
 v0.4.0, the two opt-in writable `restore_*` tools), validates host names
 and snapshot/path inputs, gates restore on per-host operator config,
 translates human time phrases, and maps exceptions to MCP error responses.

@@ -14,7 +14,9 @@ credentials living anywhere on your machine.
 
 For each new version (e.g. `v0.1.1`, `v0.2.0`):
 
-1. **Bump the version** in `pyproject.toml` (`version = "X.Y.Z"`).
+1. **Version is automatic** — `hatch-vcs` derives it from the tag
+   (`vX.Y.Z` → `X.Y.Z`). No manual bump needed. Just ensure the tag
+   follows the `v` prefix convention.
 2. **Add a CHANGELOG entry.** Put a new `## [X.Y.Z] — YYYY-MM-DD` section
    above the prior one, summarising what changed. Update the link
    references at the bottom of the file.

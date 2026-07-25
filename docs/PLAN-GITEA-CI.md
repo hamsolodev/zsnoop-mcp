@@ -117,6 +117,31 @@ What happens on tag push:
 | `.gitea/workflows/publish.yml` | **Create** |
 | `docs/PUBLISHING.md` | Modify: update per-release checklist for hatch-vcs |
 
+## Phase 5: Docs Correctness Pass
+
+**Gates**: Phases 1–4 committed and pushed. Gitea workflows green on main.
+
+**Scope**: All docs in the repo + relevant Vaults (Syncthing-synced `~/Vaults/reports`).
+
+**Checks**:
+
+1. **Internal consistency** — version numbers, file paths, URLs, commands
+2. **CHANGELOG** — verify `v0.4.1` entry is accurate, no stale references
+3. **PUBLISHING.md** — hatch-vcs section correct, Gitea URLs valid
+4. **INSTALL.md** — pip install path uses correct registry URL
+5. **INSTRUCTIONS** (runtime docs) — no stale version references
+6. **mkdocs.yml** — nav includes all pages, no broken links
+7. **Vaults** — check `~/Vaults/reports` for any zsnoop-mcp reports that reference old version numbers or outdated procedures
+
+**Verification**:
+```bash
+uv run mkdocs build --strict          # no missing/404 pages
+grep -rn "0\.1\.0" src/ docs/        # no stale version strings
+grep -rn "0\.4\.1" src/ docs/        # verify intentional references
+```
+
+---
+
 ## Risks & Mitigations
 
 | Risk | Mitigation |

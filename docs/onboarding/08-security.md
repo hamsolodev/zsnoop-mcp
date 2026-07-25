@@ -31,7 +31,7 @@ Out of scope:
 
 Enforced by an explicit `METHODS` dict in
 [`agent/zfs_snoop_agent.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/agent/zfs_snoop_agent.py).
-The 27 read-only methods are always present. The two writable methods
+The 25 read-only methods are always present. The two writable methods
 added in v0.4.0 (`restore_file`, `restore_dir`) are in the dispatch
 table too, but the **server** refuses to call them unless the target
 host has `allow_restore = true` *and* a non-empty `restore_paths`

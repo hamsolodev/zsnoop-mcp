@@ -45,7 +45,7 @@ METHODS: Final[dict[str, Any]] = {
     "snapshots_containing": m_snapshots_containing,
     "first_appearance": m_first_appearance,
     "size_delta": m_size_delta,
-    # ... (full list in the source — 27 read-only methods total)
+    # ... (full list in the source — 25 read-only methods; plus 2 writable restore methods)
     # v0.4.0 added two writable methods; see below.
     "restore_file": m_restore_file,
     "restore_dir": m_restore_dir,
