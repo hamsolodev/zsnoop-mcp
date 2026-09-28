@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-28
+
+Patch release: two dependency security fixes, and a dependency cap that
+stops fresh installs crashing at startup.
+
+### Fixed
+
+- **Server crashed at import on a fresh install**: `mcp` 2.x removed
+  `mcp.server.fastmcp` (FastMCP became `MCPServer`), and the range was
+  uncapped, so a new install resolved 2.x and died before serving. MCP
+  clients reported `-32000: Connection closed`. `mcp` is now capped at
+  `<2` until the 2.x migration lands (#2).
+
+### Security
+
+- **anyio 4.13.0 → 4.15.1** for CVE-2026-63374 and CVE-2026-64847
+  (fixed upstream in 4.14.2). typing-extensions moves to 4.16.0, which
+  anyio 4.15 requires.
+- **cryptography → 50.0.1** and **pip → 26.2.1** in the lock, for
+  PYSEC-2026-3552 and PYSEC-2026-3721.
+
+### Changed
+
+- CI actions are pinned by commit SHA rather than by mutable tag.
+- README no longer offers pipx or pip as install routes.
+
 ## [0.4.2] — 2026-07-25
 
 Patch release. CI-only: the 0.4.1 workflows could not complete, so this is
@@ -506,7 +532,8 @@ Initial public release.
 - PII scrubbed from example values throughout the repo and from git
   history.
 
-[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/hamsolodev/zsnoop-mcp/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.3
 [0.4.2]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.2
 [0.4.1]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/hamsolodev/zsnoop-mcp/releases/tag/v0.4.0
