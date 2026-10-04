@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **pyjwt 2.13.0 → 2.15.1** (13 advisories, PYSEC-2026-4140 to -4152;
+  pulled in by `mcp`), **urllib3 2.7.0 → 2.8.0** (3 advisories) and
+  **virtualenv 21.3.3 → 21.14.5** (8 advisories, dev-only via
+  pre-commit) and **mkdocs-material 9.7.6 → 9.7.7** (PYSEC-2026-3864,
+  docs-only) in the lock. `pip-audit` was failing on `main`.
+
 ### Changed
 
 - **Space-accounting caveats in the server instructions and tool
