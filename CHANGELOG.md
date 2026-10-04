@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Space-accounting caveats in the server instructions and tool
+  descriptions** (#1). The size tools return raw bytes from different ZFS
+  lenses that look summable and mostly are not. Each size-related tool
+  description now carries a "Space caveat", and the server instructions
+  summarise them: snapshot `used` is not additive and not a reclaim
+  estimate; `snapshot_cadence`'s `unique_bytes` / `total_unique_bytes` are
+  lower bounds; `size_delta` is `written@` (new data, not net growth); pool
+  `size`/`free` include RAIDZ parity; only `used = usedbydataset +
+  usedbysnapshots + usedbychildren + usedbyrefreservation` adds up.
+  USAGE.md has a table of what each number means.
+
+### Fixed
+
+- **`size_breakdown` and `top_consumers` claimed `du` equivalence.** They
+  sum `st_size`, i.e. apparent size (`du --apparent-size`), not allocated
+  blocks: compressed and sparse data are overstated, hard links count once
+  per link, and a directory adds its own `st_size` (an entry count on ZFS).
+  The descriptions now say so; behaviour is unchanged and pinned by a test.
+
 ## [0.4.3] — 2026-09-28
 
 Patch release: two dependency security fixes, and a dependency cap that

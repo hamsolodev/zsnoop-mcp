@@ -76,6 +76,48 @@ def _registered_tool_names(server: Any) -> set[str]:
     return set(server._tool_manager._tools.keys())
 
 
+# ---- space-accounting caveats (#1) -----------------------------------------
+
+# Tools whose byte counts an LLM is tempted to add up. Each description must
+# carry a "Space caveat" so the warning is at the point of use.
+_SPACE_TOOLS = (
+    "list_pools",
+    "list_datasets",
+    "dataset_properties",
+    "list_snapshots",
+    "snapshot_cadence",
+    "stale_snapshots",
+    "size_breakdown",
+    "top_consumers",
+    "size_delta",
+)
+
+
+async def _descriptions(server: Any) -> dict[str, str]:
+    return {t.name: t.description or "" for t in await server.list_tools()}
+
+
+async def test_space_tools_carry_caveats(cfg: Config, fake_pool: FakePool) -> None:
+    descs = await _descriptions(create_server(fake_pool, cfg))  # type: ignore[arg-type]
+    missing = [name for name in _SPACE_TOOLS if "Space caveat" not in descs[name]]
+    assert missing == []
+
+
+async def test_snapshot_used_flagged_non_additive(cfg: Config, fake_pool: FakePool) -> None:
+    descs = await _descriptions(create_server(fake_pool, cfg))  # type: ignore[arg-type]
+    for name in ("list_snapshots", "snapshot_cadence", "stale_snapshots"):
+        assert "not additive" in descs[name] or "not reclaimable" in descs[name], name
+    assert "NOT additive" in srv_mod.INSTRUCTIONS
+
+
+async def test_size_breakdown_does_not_claim_du(cfg: Config, fake_pool: FakePool) -> None:
+    """It sums st_size; plain ``du`` reports allocated blocks. Say so."""
+    descs = await _descriptions(create_server(fake_pool, cfg))  # type: ignore[arg-type]
+    for name in ("size_breakdown", "top_consumers"):
+        assert "apparent" in descs[name], name
+    assert "Equivalent to ``du --max-depth=1" not in descs["size_breakdown"]
+
+
 # ---- tool registration ------------------------------------------------------
 
 

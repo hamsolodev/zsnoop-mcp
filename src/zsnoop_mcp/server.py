@@ -284,7 +284,18 @@ INSTRUCTIONS = (
     "haven't opted in. All operations are scoped to a host configured "
     "by the operator. Use `list_hosts` first to see what's reachable; "
     "pass `host` to every other tool. Time-range parameters accept ISO "
-    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'."
+    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'. "
+    "Space accounting: every size is raw bytes (GiB = bytes / 1024**3). "
+    "A snapshot's `used` is the space unique to it and is NOT additive: "
+    "never sum it to estimate what deleting snapshots would free (that "
+    "needs a dry-run `zfs destroy -nv`, which this server does not run). "
+    "`size_breakdown` / `top_consumers` report apparent file sizes "
+    "(st_size), not on-disk usage, so they are not comparable with a "
+    "dataset's `used`/`referenced`, which are allocated bytes after "
+    "compression. Of the `used*` properties, only `used = usedbydataset + "
+    "usedbysnapshots + usedbychildren + usedbyrefreservation` adds up. "
+    "Trust a dataset's `avail` for free space; never derive it from disk "
+    "count or pool `size`."
 )
 
 
@@ -339,6 +350,13 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         Each pool reports ``size``, ``allocated``, ``free`` (bytes), and
         ``health``. Useful when you don't already know what pools exist —
         prefer this over the static ``pools`` field in the host config.
+
+        Space caveat: these are ``zpool list`` figures, i.e. raw vdev
+        capacity. On RAIDZ they *include parity*, so ``free`` overstates
+        what datasets can store; ZFS also holds back slop space (about
+        1/32 of the pool). For usable free space read a dataset's
+        ``avail`` (``list_datasets``), never ``size`` or disk count x disk
+        size.
         """
         return await _call(host, "list_pools")
 
@@ -357,7 +375,16 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
 
     @mcp.tool()
     async def list_datasets(host: str) -> dict[str, Any]:
-        """List ZFS filesystems and volumes on `host` (no snapshots)."""
+        """List ZFS filesystems and volumes on `host` (no snapshots).
+
+        Each reports ``used`` and ``avail`` in bytes.
+
+        Space caveat: ``used`` includes the
+        dataset's children and snapshots, so summing ``used`` down a tree
+        double-counts. ``avail`` already allows for parity, slop, quotas and
+        reservations, and child datasets share their parent's pool space:
+        one dataset's ``avail`` is not extra space on top of another's.
+        """
         return await _call(host, "list_datasets")
 
     @mcp.tool()
@@ -377,6 +404,16 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         Use this for "why is this dataset behaving like that?" — quota,
         compression ratio, atime, recordsize, mountpoint, encryption,
         canmount, etc. are all here.
+
+        Space caveat: ``referenced``, ``used``, ``logicalused`` and the
+        ``usedby*`` family are different views and do not add up across
+        each other. The only valid decomposition is ``used =
+        usedbydataset + usedbysnapshots + usedbychildren +
+        usedbyrefreservation``. ``usedbysnapshots`` is what destroying
+        *all* of this dataset's snapshots would free; it is usually larger
+        than the sum of the snapshots' individual ``used``. ``used`` and
+        ``referenced`` are allocated bytes after compression;
+        ``logicalused`` / ``logicalreferenced`` are before it.
         """
         params: dict[str, Any] = {"dataset": dataset}
         if properties is not None:
@@ -408,7 +445,15 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         or pass ``max_results``.
 
         For aggregate summary statistics (counts by retention class,
-        biggest gap, total unique bytes), prefer ``snapshot_cadence``.
+        biggest gap, span), prefer ``snapshot_cadence``.
+
+        Space caveat: a snapshot's ``used`` is the space unique to it and
+        is **not additive** — do not sum it to estimate reclaimable space.
+        Blocks shared by two or more snapshots appear in no snapshot's
+        ``used``, so destroying a set frees at least the sum and often
+        more, and destroying one snapshot can raise its neighbours'
+        ``used``. ``refer`` is the data the snapshot can see, mostly
+        shared with the live dataset.
         """
         try:
             after_iso = maybe_to_iso(after)
@@ -438,6 +483,14 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         to answer "is this dataset being snapshotted as expected?" or
         "what's the retention window?" without doing arithmetic on a
         long ``list_snapshots`` response.
+
+        Space caveat: ``unique_bytes`` (per class) and
+        ``total_unique_bytes`` are sums of per-snapshot ``used``, which is
+        not additive. Each is a lower bound on what destroying those
+        snapshots would free, not an estimate of it. For the true figure
+        across all of one dataset's snapshots, read its
+        ``usedbysnapshots`` via ``dataset_properties``. When ``dataset`` is
+        given the summary also covers its descendants.
         """
         return await _call(host, "snapshot_cadence", {"dataset": dataset} if dataset else None)
 
@@ -477,14 +530,23 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         path: str,
         max_entries: int | None = None,
     ) -> dict[str, Any]:
-        """Total bytes for a snapshot directory, plus per-immediate-child sizes.
+        """Total apparent size of a snapshot directory, plus per-immediate-child sizes.
 
-        Equivalent to ``du --max-depth=1 --block-size=1`` on the snapshot
-        path. For each immediate child of ``path``, returns the recursive
-        byte total of its subtree. Symlinks are never followed (their own
-        inode size is counted). Use this to answer "how big is X?" and
+        For each immediate child of ``path``, returns the recursive sum of
+        ``st_size`` over its subtree. Symlinks are never followed (their
+        own inode size is counted). Use this to answer "how big is X?" and
         "what's inside X that's taking the space?" in a single call;
         drill down by calling again on a large child.
+
+        Space caveat: this is **apparent size** — what ``ls -l`` or ``du
+        --apparent-size`` would show — not allocated blocks, so it is *not*
+        ``du``'s default and not comparable with a dataset's ``used`` /
+        ``referenced`` (allocated bytes after compression). It overstates
+        disk use for compressible data and sparse files, counts a
+        hard-linked file once per link (``du`` counts it once), and adds
+        each directory's own ``st_size``, which on ZFS is an entry count
+        rather than bytes. It also says nothing about what deleting the
+        files would free: their blocks may be held by other snapshots.
 
         Bounded by ``max_entries`` (default 100,000, hard cap 1,000,000)
         and by a 30s wall-clock budget. On hitting either limit, the
@@ -510,14 +572,18 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         Walks the subtree (bounded the same way as ``size_breakdown``)
         and keeps a heap of the *n* largest entries seen — files,
         directories (subtree total), and symlinks (own lstat size).
-        Result is like ``du -ab | sort -rn | head -n``, with paths
-        relative to ``path``.
+        Result is like ``du -ab --apparent-size | sort -rn | head -n``,
+        with paths relative to ``path``.
 
         Use after ``size_breakdown`` once you know *which subtree* is
         big and want to know *which specific files and dirs* inside it
         are responsible. ``n`` defaults to 20 (hard cap 1000);
         ``max_entries`` defaults to 100,000 walked (hard cap 1,000,000)
         and the same 30s wall-clock backstop applies.
+
+        Space caveat: sizes are apparent (``st_size``), with the same
+        limits as ``size_breakdown``: not compressed on-disk usage, hard
+        links counted per link, and not what deleting an entry would free.
         """
         params: dict[str, Any] = {"snapshot": snapshot, "path": path}
         if n is not None:
@@ -754,13 +820,20 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         dataset: str | None = None,
         max_results: int | None = None,
     ) -> dict[str, Any]:
-        """Snapshots older than `older_than`, sorted by unique bytes desc.
+        """Snapshots older than `older_than`, sorted by ``used`` descending.
 
         ``older_than`` accepts ISO 8601 or a phrase like ``"6 months ago"``,
         ``"last year"``. Results are sorted so the biggest-by-``used``
-        appear first — direct input to "what should I cull?". Scoped to
-        ``dataset`` if given, else covers every visible snapshot.
+        appear first, as a starting point for "what should I cull?".
+        Scoped to ``dataset`` if given, else covers every visible snapshot.
         Bounded by ``max_results`` (default 1000, capped at 10 000).
+
+        Space caveat: ``used`` is not reclaimable space. Destroying a set
+        frees at least the sum of its ``used`` and often more (blocks
+        shared only among the destroyed snapshots), and survivors' ``used``
+        can grow afterwards. Only a dry-run ``zfs destroy -nv
+        pool/ds@first%last`` gives the real figure; this server does not
+        run it, so tell the operator to.
         """
         try:
             older_than_iso = maybe_to_iso(older_than)
@@ -779,7 +852,17 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
     async def size_delta(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:
         """Return the bytes written between `snap_a` and `snap_b` of one dataset.
 
-        Both snapshots must belong to the same dataset.
+        Both snapshots must belong to the same dataset, and ``snap_a`` must
+        be the older one (reversed, ZFS reports ``-`` and ``written_bytes``
+        is null). This is ZFS's ``written@<snap_a>`` property of
+        ``snap_b``: the space ``snap_b`` references that was written after
+        ``snap_a``, in allocated bytes after compression.
+
+        Space caveat: it counts new data, not net growth — deletions do not
+        reduce it, so it is not ``refer(snap_b) - refer(snap_a)``, and data
+        written and then overwritten between the two snapshots is not in it.
+        It is not comparable with the apparent sizes from
+        ``size_breakdown``.
         """
         return await _call(host, "size_delta", {"snap_a": snap_a, "snap_b": snap_b})
 

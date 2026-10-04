@@ -118,15 +118,15 @@ grouped below by their dominant use case; many compose across workflows.
 | ---------------------- | -------------------------------------------------------- |
 | `list_snapshots`       | Snapshots (optional dataset/time/cap filters)            |
 | `snapshot_cadence`     | Summary: counts by class, gap (per-dataset), span        |
-| `stale_snapshots`      | Snapshots older than a time phrase, sorted by uniqueness |
-| `size_delta`           | Bytes written between two snapshots of one dataset       |
+| `stale_snapshots`      | Snapshots older than a time phrase, sorted by `used`     |
+| `size_delta`           | `written@` bytes between two snapshots of one dataset    |
 
 ### Browsing & sizing within a snapshot
 
 | Tool                   | What it does                                             |
 | ---------------------- | -------------------------------------------------------- |
 | `list_dir`             | Bounded directory listing within a snapshot              |
-| `size_breakdown`       | Recursive bytes for a snapshot dir + per-child sizes     |
+| `size_breakdown`       | Apparent size of a snapshot dir + per-child sizes        |
 | `top_consumers`        | Top-N largest files/dirs under a snapshot subtree        |
 
 ### Reading content

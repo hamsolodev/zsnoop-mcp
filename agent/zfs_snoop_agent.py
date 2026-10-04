@@ -686,6 +686,11 @@ def _snapshot_class(name: str) -> str:
 def m_snapshot_cadence(params: dict[str, Any]) -> dict[str, Any]:
     """Summary stats for the snapshot inventory of one or all datasets.
 
+    ``unique_bytes`` / ``total_unique_bytes`` are sums of per-snapshot
+    ``used``. ``used`` is not additive (blocks shared by two or more
+    snapshots are in nobody's ``used``), so these are lower bounds on what
+    destroying the snapshots would free, not estimates of it.
+
     Replaces the manual arithmetic of "I called ``list_snapshots`` and got
     58 entries; what's the cadence, what's the retention window, are
     there gaps?" with a single structured response.
@@ -847,7 +852,10 @@ def _sum_subtree(
     budget: list[int],
     deadline: float,
 ) -> tuple[int, bool]:
-    """Sum the lstat sizes of every entry under *root*.
+    """Sum the lstat ``st_size`` (apparent size) of every entry under *root*.
+
+    Not allocated blocks: compression, sparse files and block overhead are
+    invisible here, and a hard-linked file is counted once per link.
 
     *budget* is a one-element list so callers can observe what's left after
     nested recursion drains it. *deadline* is a monotonic-clock cutoff.
@@ -889,12 +897,14 @@ def _sum_subtree(
 
 
 def m_size_breakdown(params: dict[str, Any]) -> dict[str, Any]:
-    """Recursive byte total for a snapshot dir plus per-immediate-child sizes.
+    """Recursive apparent-size total for a snapshot dir plus per-immediate-child sizes.
 
-    Equivalent in spirit to ``du --max-depth=1 --block-size=1 PATH``: for each
-    immediate child of *path*, recursively sum lstat sizes. Symlinks are never
-    followed; their own inode size is counted but they don't contribute their
-    target's contents.
+    For each immediate child of *path*, recursively sum lstat ``st_size``.
+    That is ``du --apparent-size --max-depth=1 --block-size=1 PATH`` rather
+    than plain ``du``: no compression, sparse files at full length, hard
+    links counted once per link, and each directory's own ``st_size`` (an
+    entry count on ZFS) included. Symlinks are never followed; their own
+    inode size is counted but they don't contribute their target's contents.
 
     Bounded by *max_entries* (default ``DEFAULT_SIZE_WALK_ENTRIES``, hard cap
     ``MAX_SIZE_WALK_ENTRIES``) and by ``SIZE_WALK_TIMEOUT_SECONDS``. Either
@@ -1007,8 +1017,8 @@ def _walk_for_top_consumers(
     """Walk *dir_path*, push every entry into *heap*, return ``(bytes, truncated)``.
 
     Iterates lstat-style (G3 — never follows symlinks). The dir's own
-    inode size is added to the returned subtree total to match ``du``
-    semantics.
+    ``st_size`` is added to the returned subtree total, as ``du -ab
+    --apparent-size`` does. Sizes are apparent, not allocated.
     """
     subtree_total = 0
     if budget[0] <= 0 or time.monotonic() >= deadline:
@@ -1059,8 +1069,9 @@ def m_top_consumers(params: dict[str, Any]) -> dict[str, Any]:
 
     Walks the subtree bounded by ``max_entries`` (same as ``size_breakdown``)
     and keeps a heap of the *N* largest entries seen. For directories, the
-    reported ``bytes`` is the recursive subtree sum (so the result is like
-    ``du -ab | sort -rn | head -n``, minus the request path itself).
+    reported ``bytes`` is the recursive subtree sum of apparent sizes (so the
+    result is like ``du -ab --apparent-size | sort -rn | head -n``, minus the
+    request path itself, with hard links counted once per link).
 
     Use after ``size_breakdown`` once you've identified a big subtree:
     ``size_breakdown`` says "here's how the children split"; this says
@@ -1098,13 +1109,14 @@ def m_top_consumers(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def m_stale_snapshots(params: dict[str, Any]) -> dict[str, Any]:
-    """Snapshots older than ``older_than``, sorted by unique bytes used.
+    """Snapshots older than ``older_than``, sorted by ``used`` descending.
 
     Resolves ``older_than`` (ISO 8601 or a human phrase like
     ``"6 months ago"``) to a Unix timestamp and returns the snapshots
-    whose creation predates it. Sort order is descending ``used`` —
-    the biggest-by-unique-bytes appear first, which is what you want
-    when deciding what to cull.
+    whose creation predates it. Sort order is descending ``used`` (space
+    unique to each snapshot). That is a starting point for culling, not a
+    reclaim estimate: ``used`` is not additive, and destroying a set frees
+    at least its sum, often more.
 
     Scoped to *dataset* if given, else covers every visible snapshot.
     Bounded by ``max_results`` (default 1000, capped at 10 000).
@@ -1782,7 +1794,12 @@ def m_versions_of(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def m_size_delta(params: dict[str, Any]) -> dict[str, Any]:
-    """Return the bytes written between *snap_a* and *snap_b* of the same dataset."""
+    """Return ``written@<snap_a>`` of *snap_b*: space written after *snap_a*.
+
+    Allocated bytes after compression. New data only: deletions do not reduce
+    it. *snap_a* must be older; reversed, ZFS reports ``-`` and the result is
+    ``None``.
+    """
     snap_a = _require_str(params, "snap_a")
     snap_b = _require_str(params, "snap_b")
     ds_a, _ = validate_snapshot(snap_a)

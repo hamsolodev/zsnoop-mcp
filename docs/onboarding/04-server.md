@@ -88,16 +88,26 @@ INSTRUCTIONS = (
     "haven't opted in. All operations are scoped to a host configured "
     "by the operator. Use `list_hosts` first to see what's reachable; "
     "pass `host` to every other tool. Time-range parameters accept ISO "
-    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'."
+    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'. "
+    "Space accounting: every size is raw bytes (GiB = bytes / 1024**3). "
+    "A snapshot's `used` is the space unique to it and is NOT additive: "
+    ...
 )
 ```
 
-Two LLM-steering tricks worth noting:
+(Abridged; `src/zsnoop_mcp/server.py` has the full text.)
+
+Three LLM-steering tricks worth noting:
 
 - **"Use `list_hosts` first"** — gives the model a known entry point so it
   doesn't guess names.
 - **Mention the time-phrase parser** — without this, the model would
   probably reach for ISO 8601 mechanically, which is more typing.
+- **Warn about ZFS space arithmetic** — the tools return raw byte counts
+  from several different ZFS lenses (unique-to-snapshot, allocated,
+  apparent). They look summable and mostly are not, so the preamble and the
+  size-related tool descriptions each carry a "Space caveat". See
+  [USAGE.md](../USAGE.md#space-accounting-what-the-numbers-mean).
 
 ### Tool docstrings carry weight
 
