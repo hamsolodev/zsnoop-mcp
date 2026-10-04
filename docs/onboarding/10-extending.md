@@ -126,7 +126,7 @@ In [`src/zsnoop_mcp/server.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/ma
 `create_server`:
 
 ```python
-@mcp.tool()
+@tool
 async def list_pools(host: str) -> dict[str, Any]:
     """List ZFS pools visible to the agent on `host`.
 
@@ -147,6 +147,11 @@ Three things to get right:
 - **`_call(host, method, params=None)`** — always go through this helper,
   not `pool.call` directly. That's how host validation and error mapping
   stay centralised.
+- **`@tool`, not `@mcp.tool()`.** The registrar is what lets the tool's
+  `ValueError` / `RuntimeError` messages reach the model (see
+  [The MCP server](04-server.md#registering-tools-_tool_registrar)).
+  `@mcp.tool()` would register it fine and then reduce every error to
+  "Error executing tool list_pools".
 
 ### Step 6 — Update the server's tool-registration test
 
@@ -155,7 +160,7 @@ In [`tests/test_server.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/t
 ```python
 async def test_server_registers_expected_tools(...) -> None:
     server = create_server(fake_pool, cfg)
-    names = _registered_tool_names(server)
+    names = await _registered_tool_names(server)
     assert names == {
         ...
         "list_pools",                  # <-- new

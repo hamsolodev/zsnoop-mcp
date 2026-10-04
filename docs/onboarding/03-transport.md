@@ -196,5 +196,5 @@ make calls concurrently; same host serialises.
 
 ## What to read next
 
-→ [The MCP server](04-server.md) — how the layer above turns FastMCP tool
+→ [The MCP server](04-server.md) — how the layer above turns MCP tool
 calls into `pool.call(host, method, params)`.

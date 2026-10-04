@@ -3,7 +3,7 @@
 ## What
 
 [`src/zsnoop_mcp/server.py`](https://github.com/hamsolodev/zsnoop-mcp/blob/main/src/zsnoop_mcp/server.py) — registers
-every agent method as a FastMCP tool (25 read-only operations plus, from
+every agent method as an MCP tool (25 read-only operations plus, from
 v0.4.0, the two opt-in writable `restore_*` tools), validates host names
 and snapshot/path inputs, gates restore on per-host operator config,
 translates human time phrases, and maps exceptions to MCP error responses.
@@ -13,7 +13,8 @@ translates human time phrases, and maps exceptions to MCP error responses.
 The agent speaks **JSON-RPC over stdio**. The MCP client speaks
 **MCP over stdio** (a richer protocol with tool schemas, content blocks,
 resource URIs, capabilities negotiation). Something has to translate. That
-something is FastMCP, with our `create_server` registering each tool.
+something is the MCP Python SDK's high-level `MCPServer` (called `FastMCP`
+before SDK 2.0), with our `create_server` registering each tool.
 
 This layer also gets to be the **LLM-facing surface**. Tool names,
 parameter names, docstrings — all of these become part of the prompt the
@@ -29,14 +30,15 @@ The whole module is essentially one factory function. It takes:
 - A `ConnectionPool` (the transport).
 - A `Config` (so it knows what host names are valid).
 
-And it returns a configured `FastMCP` instance. Why a factory and not a
+And it returns a configured `MCPServer` instance. Why a factory and not a
 module-level singleton: so tests can pass a `FakePool` and inspect
 behaviour without spawning real subprocesses (see
 [Testing patterns](07-testing.md)).
 
 ```python
-def create_server(pool: ConnectionPool, config: Config) -> FastMCP:
-    mcp = FastMCP("zsnoop-mcp", instructions=INSTRUCTIONS)
+def create_server(pool: ConnectionPool, config: Config) -> MCPServer:
+    mcp = MCPServer(name="zsnoop-mcp", instructions=INSTRUCTIONS, version=__version__)
+    tool = _tool_registrar(mcp)
 
     def _validate_host(host: str) -> None:
         try:
@@ -53,7 +55,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:
         except TransportError as e:
             raise RuntimeError(f"transport error talking to {host!r}: {e}") from e
 
-    @mcp.tool()
+    @tool
     async def list_datasets(host: str) -> dict[str, Any]:
         """List ZFS filesystems and volumes on `host` (no snapshots)."""
         return await _call(host, "list_datasets")
@@ -66,7 +68,33 @@ The `_call` closure is the **single chokepoint** through which every
 agent-bound tool flows. Everything that needs to be true for any tool —
 host validation, error mapping — lives there once.
 
-### Error mapping (the contract with FastMCP)
+Pass `MCPServer` its arguments by keyword. Its positional order is `name,
+title, description, instructions, …`, so an `instructions` string passed
+positionally becomes the title and clients never receive it. Without
+`version=` the server reports an empty `serverInfo.version`.
+
+### Registering tools: `_tool_registrar`
+
+Tools are registered with `@tool` (from `_tool_registrar(mcp)`), not
+`@mcp.tool()`. It does two things the SDK no longer does on its own:
+
+- **Surfaces error messages.** SDK 2.x treats any exception other than its
+  `ToolError` as a crash: the model sees only `Error executing tool <name>`
+  and the traceback goes to the server log. SDK 1.x passed every message
+  through, and our tools depend on that — "unknown host", the agent's error
+  code, the transport failure are what let the LLM correct itself. The
+  registrar re-raises `ValueError`, `RuntimeError` and `OSError` as
+  `ToolError`. Anything else is a bug and keeps the generic message.
+- **Dedents descriptions.** SDK 2.x sends the docstring verbatim; an
+  indented docstring renders as a code block in markdown-aware clients. The
+  registrar passes `inspect.cleandoc(fn.__doc__)`.
+
+It returns the undecorated function. Tests call a tool body through
+`inspect.unwrap(tool.fn)` so `pytest.raises(ValueError)` sees the body's own
+exception, and test what a client receives by connecting an in-process
+`mcp.Client` to the server.
+
+### Error mapping (the contract with the MCP client)
 
 | Source | Raised in `_call` as | What the client sees |
 | --- | --- | --- |
@@ -111,11 +139,11 @@ Three LLM-steering tricks worth noting:
 
 ### Tool docstrings carry weight
 
-These are not just for humans. FastMCP injects them into the tool's
+These are not just for humans. The SDK injects them into the tool's
 description, which the LLM reads when deciding what to call. Example:
 
 ```python
-@mcp.tool()
+@tool
 async def snapshots_containing(
     host: str,
     dataset: str,

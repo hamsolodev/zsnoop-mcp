@@ -1,7 +1,7 @@
-"""FastMCP server: register read-only ZFS snapshot tools backed by the agent.
+"""MCP server: register read-only ZFS snapshot tools backed by the agent.
 
 Tools call through the shared :class:`ConnectionPool`; agent errors surface as
-``ValueError`` (caught by FastMCP and returned as tool errors); local
+``ValueError`` (caught by MCPServer and returned as tool errors); local
 transport failures surface as :class:`RuntimeError`. Time-range parameters
 accepting human phrases like ``"yesterday"`` are parsed locally before
 forwarding ISO 8601 timestamps to the agent.
@@ -10,15 +10,20 @@ forwarding ISO 8601 timestamps to the agent.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import posixpath
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, ParamSpec
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
+from zsnoop_mcp import __version__
 from zsnoop_mcp.config import Config, ConfigError, HostConfig
 from zsnoop_mcp.timeparse import TimePhraseError, maybe_to_iso
 from zsnoop_mcp.transport import AgentRpcError, ConnectionPool, TransportError
@@ -299,9 +304,54 @@ INSTRUCTIONS = (
 )
 
 
-def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR0915 - one body, twelve tools
-    """Build a FastMCP server with all snapshot tools registered."""
-    mcp = FastMCP("zsnoop-mcp", instructions=INSTRUCTIONS)
+_P = ParamSpec("_P")
+_ToolFn = Callable[_P, Awaitable[dict[str, Any]]]
+
+# Exceptions whose message the client must see. Tools raise ValueError for bad
+# input and RuntimeError for transport/fetch failures (the error contract in
+# docs/onboarding/04-server.md); OSError covers local fetch/restore I/O. mcp
+# 2.x hides the text of any exception that is not a ToolError ("Error
+# executing tool <name>" only, traceback logged server-side), where 1.x
+# passed every message through. Anything outside this tuple is a bug and
+# keeps 2.x's generic treatment.
+_SURFACED_ERRORS: Final = (ValueError, RuntimeError, OSError)
+
+
+def _tool_registrar(mcp: MCPServer) -> Callable[[_ToolFn[_P]], _ToolFn[_P]]:
+    """Return a decorator that registers a tool with *mcp*, surfacing its errors.
+
+    The registered callable re-raises :data:`_SURFACED_ERRORS` as
+    :class:`ToolError`, so the model gets ``is_error=True`` with the message,
+    as it did under mcp 1.x. The description is the docstring passed through
+    :func:`inspect.cleandoc`: mcp 2.x sends docstrings verbatim, indentation
+    included, which a markdown-rendering client shows as a code block.
+
+    The decorator returns the undecorated function. Tests reach the tool body
+    through ``inspect.unwrap`` on the registered callable.
+    """
+
+    def register(fn: _ToolFn[_P]) -> _ToolFn[_P]:
+        @functools.wraps(fn)
+        async def surfaced(*args: _P.args, **kwargs: _P.kwargs) -> dict[str, Any]:
+            try:
+                return await fn(*args, **kwargs)
+            except _SURFACED_ERRORS as e:
+                raise ToolError(str(e)) from e
+
+        mcp.add_tool(surfaced, description=inspect.cleandoc(fn.__doc__ or ""))
+        return fn
+
+    return register
+
+
+def create_server(pool: ConnectionPool, config: Config) -> MCPServer:  # noqa: PLR0915 - one body, twelve tools
+    """Build an MCP server with all snapshot tools registered."""
+    # Keywords only: MCPServer's positional order is name, title,
+    # description, instructions (mcp 2.x), so a positional instructions
+    # string would silently become the title. Without version= the
+    # server reports an empty serverInfo.version.
+    mcp = MCPServer(name="zsnoop-mcp", instructions=INSTRUCTIONS, version=__version__)
+    tool = _tool_registrar(mcp)
 
     def _validate_host(host: str) -> None:
         try:
@@ -319,7 +369,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         except TransportError as e:
             raise RuntimeError(f"transport error talking to {host!r}: {e}") from e
 
-    @mcp.tool()
+    @tool
     async def list_hosts() -> dict[str, Any]:
         """List the hosts this server is configured to talk to.
 
@@ -338,12 +388,12 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             ],
         }
 
-    @mcp.tool()
+    @tool
     async def agent_info(host: str) -> dict[str, Any]:
         """Return version, supported methods, and limits of the agent on `host`."""
         return await _call(host, "agent_info")
 
-    @mcp.tool()
+    @tool
     async def list_pools(host: str) -> dict[str, Any]:
         """List ZFS pools visible to the agent on `host`.
 
@@ -360,7 +410,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "list_pools")
 
-    @mcp.tool()
+    @tool
     async def pool_status(host: str, pool: str | None = None) -> dict[str, Any]:
         """Parsed ``zpool status`` for one pool or all pools on `host`.
 
@@ -373,7 +423,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "pool_status", {"pool": pool} if pool else None)
 
-    @mcp.tool()
+    @tool
     async def list_datasets(host: str) -> dict[str, Any]:
         """List ZFS filesystems and volumes on `host` (no snapshots).
 
@@ -387,7 +437,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "list_datasets")
 
-    @mcp.tool()
+    @tool
     async def dataset_properties(
         host: str,
         dataset: str,
@@ -420,7 +470,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["properties"] = properties
         return await _call(host, "dataset_properties", params)
 
-    @mcp.tool()
+    @tool
     async def list_snapshots(
         host: str,
         dataset: str | None = None,
@@ -471,7 +521,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "list_snapshots", params if params else None)
 
-    @mcp.tool()
+    @tool
     async def snapshot_cadence(host: str, dataset: str | None = None) -> dict[str, Any]:
         """Summary statistics for the snapshot inventory on `host`.
 
@@ -494,7 +544,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "snapshot_cadence", {"dataset": dataset} if dataset else None)
 
-    @mcp.tool()
+    @tool
     async def diff_snapshots(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:
         """Return paths that differ between two snapshots of the same dataset.
 
@@ -504,7 +554,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "diff_snapshots", {"snap_a": snap_a, "snap_b": snap_b})
 
-    @mcp.tool()
+    @tool
     async def list_dir(
         host: str,
         snapshot: str,
@@ -523,7 +573,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_entries"] = max_entries
         return await _call(host, "list_dir", params)
 
-    @mcp.tool()
+    @tool
     async def size_breakdown(
         host: str,
         snapshot: str,
@@ -559,7 +609,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_entries"] = max_entries
         return await _call(host, "size_breakdown", params)
 
-    @mcp.tool()
+    @tool
     async def top_consumers(
         host: str,
         snapshot: str,
@@ -592,7 +642,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_entries"] = max_entries
         return await _call(host, "top_consumers", params)
 
-    @mcp.tool()
+    @tool
     async def read_file(
         host: str,
         snapshot: str,
@@ -610,7 +660,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "read_file", params)
 
-    @mcp.tool()
+    @tool
     async def find_files(
         host: str,
         snapshot: str,
@@ -628,7 +678,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "find_files", params)
 
-    @mcp.tool()
+    @tool
     async def content_grep(
         host: str,
         snapshot: str,
@@ -646,7 +696,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "content_grep", params)
 
-    @mcp.tool()
+    @tool
     async def file_history(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Walk every snapshot of `dataset` and report the version of `path` in each.
 
@@ -657,7 +707,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "file_history", {"dataset": dataset, "path": path})
 
-    @mcp.tool()
+    @tool
     async def versions_of(
         host: str,
         dataset: str,
@@ -683,7 +733,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "versions_of", params)
 
-    @mcp.tool()
+    @tool
     async def file_diff(
         host: str,
         snap_a: str,
@@ -706,7 +756,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "file_diff", params)
 
-    @mcp.tool()
+    @tool
     async def snapshots_containing(
         host: str,
         dataset: str,
@@ -731,12 +781,12 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             {"dataset": dataset, "path": path, "after": after_iso, "before": before_iso},
         )
 
-    @mcp.tool()
+    @tool
     async def first_appearance(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Return the earliest snapshot of `dataset` in which `path` exists, or null."""
         return await _call(host, "first_appearance", {"dataset": dataset, "path": path})
 
-    @mcp.tool()
+    @tool
     async def last_appearance(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Return the *latest* snapshot of `dataset` in which `path` exists, or null.
 
@@ -745,7 +795,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "last_appearance", {"dataset": dataset, "path": path})
 
-    @mcp.tool()
+    @tool
     async def find_deleted(
         host: str,
         dataset: str,
@@ -778,7 +828,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "find_deleted", params)
 
-    @mcp.tool()
+    @tool
     async def bisect_change(
         host: str,
         dataset: str,
@@ -813,7 +863,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "bisect_change", params)
 
-    @mcp.tool()
+    @tool
     async def stale_snapshots(
         host: str,
         older_than: str,
@@ -848,7 +898,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "stale_snapshots", params)
 
-    @mcp.tool()
+    @tool
     async def size_delta(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:
         """Return the bytes written between `snap_a` and `snap_b` of one dataset.
 
@@ -866,7 +916,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "size_delta", {"snap_a": snap_a, "snap_b": snap_b})
 
-    @mcp.tool()
+    @tool
     async def checksum_file(host: str, snapshot: str, path: str) -> dict[str, Any]:
         """SHA-256 of the full content of `path` in `snapshot` on `host`.
 
@@ -881,7 +931,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "checksum_file", {"snapshot": snapshot, "path": path})
 
-    @mcp.tool()
+    @tool
     async def fetch_file(
         host: str,
         snapshot: str,
@@ -945,7 +995,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             "queried_at": datetime.now(UTC).isoformat(),
         }
 
-    @mcp.tool()
+    @tool
     async def fetch_dir(
         host: str,
         snapshot: str,
@@ -999,7 +1049,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             "queried_at": datetime.now(UTC).isoformat(),
         }
 
-    @mcp.tool()
+    @tool
     async def restore_file(
         host: str,
         snapshot: str,
@@ -1081,7 +1131,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             },
         )
 
-    @mcp.tool()
+    @tool
     async def restore_dir(
         host: str,
         snapshot: str,

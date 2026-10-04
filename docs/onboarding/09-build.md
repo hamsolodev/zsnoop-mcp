@@ -94,7 +94,7 @@ editable installs.
 
 ```toml
 [project]
-dependencies = ["mcp>=1.0", "python-dateutil>=2.9"]
+dependencies = ["mcp>=2.3,<3", "python-dateutil>=2.9"]
 
 [dependency-groups]
 dev  = ["mypy", "pre-commit", "pytest", "pytest-asyncio", "pytest-cov", "ruff", "types-python-dateutil"]

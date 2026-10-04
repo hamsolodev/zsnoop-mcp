@@ -50,7 +50,7 @@ boring protocols.
          ▼
 ┌──────────────────┐
 │ zsnoop-mcp       │  src/zsnoop_mcp/
-│   server (local) │  FastMCP, config loading, tool registration, time-parsing
+│   server (local) │  MCPServer, config loading, tool registration, time-parsing
 └────────┬─────────┘
          │ one persistent asyncio subprocess per host,
          │ line-delimited JSON-RPC 2.0 over its stdio
