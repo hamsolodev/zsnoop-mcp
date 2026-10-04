@@ -1,4 +1,4 @@
-"""Tests for the FastMCP server layer.
+"""Tests for the MCP server layer.
 
 We use a tiny ``FakePool`` instead of the real transport so the test suite
 stays hermetic. The goal is to assert that the server:
@@ -10,19 +10,25 @@ stays hermetic. The goal is to assert that the server:
 - injects queried_at into every _call() result,
 - fetch_file / fetch_dir build the correct sftp batch command.
 
-We don't spin up FastMCP's stdio loop here; we exercise the registered
-tool callables directly via FastMCP's introspection helpers.
+We don't spin up the stdio loop here. Most tests call the tool bodies
+directly (unwrapped, so they raise ValueError / RuntimeError as written);
+the error-surfacing tests go through ``MCPServer.call_tool`` to check what a
+client actually receives.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp import Client
+from mcp.types import CallToolResult, TextContent
 
+import zsnoop_mcp
 import zsnoop_mcp.server as srv_mod
 from zsnoop_mcp.config import Config, HostConfig
 from zsnoop_mcp.server import create_server
@@ -65,15 +71,61 @@ def fake_pool() -> FakePool:
 
 
 async def _tool_call(server: Any, name: str, **kwargs: Any) -> Any:
-    """Invoke a registered FastMCP tool by name, returning its raw dict."""
+    """Invoke a registered tool's body by name, returning its raw dict.
+
+    Unwraps the registrar's error-surfacing layer so a body's own
+    ValueError / RuntimeError reaches ``pytest.raises`` unconverted.
+    """
     tool = server._tool_manager.get_tool(name)
     if tool is None:
         raise LookupError(f"tool not registered: {name}")
-    return await tool.fn(**kwargs)
+    return await inspect.unwrap(tool.fn)(**kwargs)
 
 
-def _registered_tool_names(server: Any) -> set[str]:
-    return set(server._tool_manager._tools.keys())
+async def _registered_tool_names(server: Any) -> set[str]:
+    return {t.name for t in await server.list_tools()}
+
+
+# ---- space-accounting caveats (#1) -----------------------------------------
+
+# Tools whose byte counts an LLM is tempted to add up. Each description must
+# carry a "Space caveat" so the warning is at the point of use.
+_SPACE_TOOLS = (
+    "list_pools",
+    "list_datasets",
+    "dataset_properties",
+    "list_snapshots",
+    "snapshot_cadence",
+    "stale_snapshots",
+    "size_breakdown",
+    "top_consumers",
+    "size_delta",
+)
+
+
+async def _descriptions(server: Any) -> dict[str, str]:
+    return {t.name: t.description or "" for t in await server.list_tools()}
+
+
+async def test_space_tools_carry_caveats(cfg: Config, fake_pool: FakePool) -> None:
+    descs = await _descriptions(create_server(fake_pool, cfg))  # type: ignore[arg-type]
+    missing = [name for name in _SPACE_TOOLS if "Space caveat" not in descs[name]]
+    assert missing == []
+
+
+async def test_snapshot_used_flagged_non_additive(cfg: Config, fake_pool: FakePool) -> None:
+    descs = await _descriptions(create_server(fake_pool, cfg))  # type: ignore[arg-type]
+    for name in ("list_snapshots", "snapshot_cadence", "stale_snapshots"):
+        assert "not additive" in descs[name] or "not reclaimable" in descs[name], name
+    assert "NOT additive" in srv_mod.INSTRUCTIONS
+
+
+async def test_size_breakdown_does_not_claim_du(cfg: Config, fake_pool: FakePool) -> None:
+    """It sums st_size; plain ``du`` reports allocated blocks. Say so."""
+    descs = await _descriptions(create_server(fake_pool, cfg))  # type: ignore[arg-type]
+    for name in ("size_breakdown", "top_consumers"):
+        assert "apparent" in descs[name], name
+    assert "Equivalent to ``du --max-depth=1" not in descs["size_breakdown"]
 
 
 # ---- tool registration ------------------------------------------------------
@@ -81,7 +133,7 @@ def _registered_tool_names(server: Any) -> set[str]:
 
 async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool) -> None:
     server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
-    names = _registered_tool_names(server)
+    names = await _registered_tool_names(server)
     assert names == {
         "list_hosts",
         "agent_info",
@@ -114,6 +166,88 @@ async def test_server_registers_expected_tools(cfg: Config, fake_pool: FakePool)
         "restore_file",
         "restore_dir",
     }
+
+
+# ---- what a client receives (mcp 2.x, in-process protocol) ------------------
+
+# mcp 2.x shows the model only "Error executing tool <name>" for any exception
+# that is not a ToolError; 1.x passed every message through. The registrar
+# converts the documented error types back into ToolError so the message
+# survives. These tests connect a real mcp.Client to the server in-process,
+# so they cover the SDK's own request handling, not just our code.
+
+
+async def _client_call(server: Any, name: str, arguments: dict[str, Any]) -> CallToolResult:
+    async with Client(server) as client:
+        return await client.call_tool(name, arguments)
+
+
+def _text(result: CallToolResult) -> str:
+    return " ".join(c.text for c in result.content if isinstance(c, TextContent))
+
+
+async def test_initialize_reports_name_version_instructions(
+    cfg: Config, fake_pool: FakePool
+) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    async with Client(server) as client:
+        assert client.server_info is not None
+        assert client.server_info.name == "zsnoop-mcp"
+        assert client.server_info.version == zsnoop_mcp.__version__
+        assert client.instructions == srv_mod.INSTRUCTIONS
+
+
+async def test_value_error_reaches_client_with_message(cfg: Config, fake_pool: FakePool) -> None:
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    result = await _client_call(server, "agent_info", {"host": "nope"})
+    assert result.is_error is True
+    assert "unknown host: 'nope'" in _text(result)
+
+
+async def test_agent_error_reaches_client_with_code(cfg: Config, fake_pool: FakePool) -> None:
+    fake_pool.raise_ = AgentRpcError(-32602, "bad params")
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    result = await _client_call(server, "agent_info", {"host": "r2d2"})
+    assert result.is_error is True
+    assert "agent error (-32602): bad params" in _text(result)
+
+
+async def test_transport_error_reaches_client_with_message(
+    cfg: Config, fake_pool: FakePool
+) -> None:
+    fake_pool.raise_ = TransportError("agent unreachable")
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    result = await _client_call(server, "list_pools", {"host": "r2d2"})
+    assert result.is_error is True
+    assert "transport error talking to 'r2d2': agent unreachable" in _text(result)
+
+
+async def test_unexpected_exception_stays_generic(cfg: Config, fake_pool: FakePool) -> None:
+    """A bug (not a documented error type) keeps 2.x's generic message."""
+    fake_pool.raise_ = KeyError("internal detail")
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    result = await _client_call(server, "list_pools", {"host": "r2d2"})
+    assert result.is_error is True
+    assert "Error executing tool list_pools" in _text(result)
+    assert "internal detail" not in _text(result)
+
+
+async def test_success_returns_structured_content(cfg: Config, fake_pool: FakePool) -> None:
+    fake_pool.next_result = {"pools": []}
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    result = await _client_call(server, "list_pools", {"host": "r2d2"})
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["pools"] == []
+    assert "queried_at" in result.structured_content
+
+
+async def test_descriptions_are_dedented(cfg: Config, fake_pool: FakePool) -> None:
+    """mcp 2.x sends docstrings verbatim; indented lines render as code blocks."""
+    server = create_server(fake_pool, cfg)  # type: ignore[arg-type]
+    for t in await server.list_tools():
+        assert t.description, t.name
+        assert "\n        " not in t.description, t.name
 
 
 # ---- list_hosts -------------------------------------------------------------

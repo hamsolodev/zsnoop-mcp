@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP Python SDK 2.x** (#2): `mcp>=2.3,<3` (lock: 2.3.0), replacing the
+  `<2` stopgap. `FastMCP` is now `MCPServer`, constructed by keyword with
+  `version=` set, so `serverInfo.version` is the zsnoop-mcp version rather
+  than empty. The `tools/list` output (names, input and output schemas,
+  descriptions) is identical to what SDK 1.28.1 produces for the same
+  tools, apart from a trailing newline 1.x left on descriptions.
+  Dependency tree: `httpx`, `httpx-sse`, `pydantic-settings` and
+  `python-dotenv` leave; `mcp-types`, `httpx2`, `opentelemetry-api` and
+  `truststore` arrive.
+
+- **Space-accounting caveats in the server instructions and tool
+  descriptions** (#1). The size tools return raw bytes from different ZFS
+  lenses that look summable and mostly are not. Each size-related tool
+  description now carries a "Space caveat", and the server instructions
+  summarise them: snapshot `used` is not additive and not a reclaim
+  estimate; `snapshot_cadence`'s `unique_bytes` / `total_unique_bytes` are
+  lower bounds; `size_delta` is `written@` (new data, not net growth); pool
+  `size`/`free` include RAIDZ parity; only `used = usedbydataset +
+  usedbysnapshots + usedbychildren + usedbyrefreservation` adds up.
+  USAGE.md has a table of what each number means.
+
+### Fixed
+
+- **Tool error messages would have been hidden under SDK 2.x.** 2.x shows
+  the model only `Error executing tool <name>` for any exception that is
+  not its `ToolError`; 1.x passed every message through. Tools are now
+  registered through a wrapper that re-raises `ValueError`, `RuntimeError`
+  and `OSError` as `ToolError`, so "unknown host", the agent's error code
+  and transport failures still reach the model. Other exceptions are bugs
+  and keep the generic message. Tests drive a real in-process `mcp.Client`
+  to prove it.
+- **Tool descriptions under SDK 2.x** are dedented: 2.x sends docstrings
+  verbatim, and indented text renders as a code block.
+
+- **`size_breakdown` and `top_consumers` claimed `du` equivalence.** They
+  sum `st_size`, i.e. apparent size (`du --apparent-size`), not allocated
+  blocks: compressed and sparse data are overstated, hard links count once
+  per link, and a directory adds its own `st_size` (an entry count on ZFS).
+  The descriptions now say so; behaviour is unchanged and pinned by a test.
+
+### Security
+
+- **pyjwt 2.13.0 → 2.15.1** (13 advisories, PYSEC-2026-4140 to -4152;
+  pulled in by `mcp`), **urllib3 2.7.0 → 2.8.0** (3 advisories) and
+  **virtualenv 21.3.3 → 21.14.5** (8 advisories, dev-only via
+  pre-commit) and **mkdocs-material 9.7.6 → 9.7.7** (PYSEC-2026-3864,
+  docs-only) in the lock. `pip-audit` was failing on `main`.
+
 ## [0.4.3] — 2026-09-28
 
 Patch release: two dependency security fixes, and a dependency cap that

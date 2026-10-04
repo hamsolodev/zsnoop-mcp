@@ -667,6 +667,35 @@ def test_size_breakdown_empty_directory(mock_mountpoint: dict[str, Any]) -> None
     assert result["truncated"] is False
 
 
+def test_size_breakdown_reports_apparent_size_not_allocated(
+    mock_mountpoint: dict[str, Any],
+) -> None:
+    """Pin the documented semantics: apparent ``st_size``, not ``du``'s blocks.
+
+    The tool descriptions (#1) promise apparent size: a sparse file counts at
+    full length and a hard-linked file once per link. If the agent ever
+    switches to allocated blocks or inode de-duplication, the descriptions
+    must change with it, and this test says so.
+    """
+    d = mock_mountpoint["snap_root"] / "apparent"
+    d.mkdir()
+    sparse = d / "sparse.img"
+    with sparse.open("wb") as fh:
+        fh.truncate(8 * 1024 * 1024)  # 8 MiB hole, ~0 blocks allocated
+    data = d / "data.bin"
+    data.write_bytes(b"x" * 4096)
+    (d / "data.hardlink").hardlink_to(data)
+
+    result = agent.m_size_breakdown(
+        {"snapshot": mock_mountpoint["snapshot_name"], "path": "apparent"},
+    )
+    by_name = {e["name"]: e["bytes"] for e in result["entries"]}
+    assert by_name["sparse.img"] == 8 * 1024 * 1024
+    assert sparse.stat().st_blocks * 512 < 8 * 1024 * 1024  # really is sparse here
+    assert by_name["data.bin"] == by_name["data.hardlink"] == 4096
+    assert result["total_bytes"] == 8 * 1024 * 1024 + 2 * 4096
+
+
 # ---- read_file --------------------------------------------------------------
 
 

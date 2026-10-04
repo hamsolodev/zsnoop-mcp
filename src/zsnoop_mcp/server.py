@@ -1,7 +1,7 @@
-"""FastMCP server: register read-only ZFS snapshot tools backed by the agent.
+"""MCP server: register read-only ZFS snapshot tools backed by the agent.
 
 Tools call through the shared :class:`ConnectionPool`; agent errors surface as
-``ValueError`` (caught by FastMCP and returned as tool errors); local
+``ValueError`` (caught by MCPServer and returned as tool errors); local
 transport failures surface as :class:`RuntimeError`. Time-range parameters
 accepting human phrases like ``"yesterday"`` are parsed locally before
 forwarding ISO 8601 timestamps to the agent.
@@ -10,15 +10,20 @@ forwarding ISO 8601 timestamps to the agent.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import posixpath
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, ParamSpec
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
+from zsnoop_mcp import __version__
 from zsnoop_mcp.config import Config, ConfigError, HostConfig
 from zsnoop_mcp.timeparse import TimePhraseError, maybe_to_iso
 from zsnoop_mcp.transport import AgentRpcError, ConnectionPool, TransportError
@@ -284,13 +289,69 @@ INSTRUCTIONS = (
     "haven't opted in. All operations are scoped to a host configured "
     "by the operator. Use `list_hosts` first to see what's reachable; "
     "pass `host` to every other tool. Time-range parameters accept ISO "
-    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'."
+    "8601 or human phrases like 'yesterday', 'last week', '3 days ago'. "
+    "Space accounting: every size is raw bytes (GiB = bytes / 1024**3). "
+    "A snapshot's `used` is the space unique to it and is NOT additive: "
+    "never sum it to estimate what deleting snapshots would free (that "
+    "needs a dry-run `zfs destroy -nv`, which this server does not run). "
+    "`size_breakdown` / `top_consumers` report apparent file sizes "
+    "(st_size), not on-disk usage, so they are not comparable with a "
+    "dataset's `used`/`referenced`, which are allocated bytes after "
+    "compression. Of the `used*` properties, only `used = usedbydataset + "
+    "usedbysnapshots + usedbychildren + usedbyrefreservation` adds up. "
+    "Trust a dataset's `avail` for free space; never derive it from disk "
+    "count or pool `size`."
 )
 
 
-def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR0915 - one body, twelve tools
-    """Build a FastMCP server with all snapshot tools registered."""
-    mcp = FastMCP("zsnoop-mcp", instructions=INSTRUCTIONS)
+_P = ParamSpec("_P")
+_ToolFn = Callable[_P, Awaitable[dict[str, Any]]]
+
+# Exceptions whose message the client must see. Tools raise ValueError for bad
+# input and RuntimeError for transport/fetch failures (the error contract in
+# docs/onboarding/04-server.md); OSError covers local fetch/restore I/O. mcp
+# 2.x hides the text of any exception that is not a ToolError ("Error
+# executing tool <name>" only, traceback logged server-side), where 1.x
+# passed every message through. Anything outside this tuple is a bug and
+# keeps 2.x's generic treatment.
+_SURFACED_ERRORS: Final = (ValueError, RuntimeError, OSError)
+
+
+def _tool_registrar(mcp: MCPServer) -> Callable[[_ToolFn[_P]], _ToolFn[_P]]:
+    """Return a decorator that registers a tool with *mcp*, surfacing its errors.
+
+    The registered callable re-raises :data:`_SURFACED_ERRORS` as
+    :class:`ToolError`, so the model gets ``is_error=True`` with the message,
+    as it did under mcp 1.x. The description is the docstring passed through
+    :func:`inspect.cleandoc`: mcp 2.x sends docstrings verbatim, indentation
+    included, which a markdown-rendering client shows as a code block.
+
+    The decorator returns the undecorated function. Tests reach the tool body
+    through ``inspect.unwrap`` on the registered callable.
+    """
+
+    def register(fn: _ToolFn[_P]) -> _ToolFn[_P]:
+        @functools.wraps(fn)
+        async def surfaced(*args: _P.args, **kwargs: _P.kwargs) -> dict[str, Any]:
+            try:
+                return await fn(*args, **kwargs)
+            except _SURFACED_ERRORS as e:
+                raise ToolError(str(e)) from e
+
+        mcp.add_tool(surfaced, description=inspect.cleandoc(fn.__doc__ or ""))
+        return fn
+
+    return register
+
+
+def create_server(pool: ConnectionPool, config: Config) -> MCPServer:  # noqa: PLR0915 - one body, twelve tools
+    """Build an MCP server with all snapshot tools registered."""
+    # Keywords only: MCPServer's positional order is name, title,
+    # description, instructions (mcp 2.x), so a positional instructions
+    # string would silently become the title. Without version= the
+    # server reports an empty serverInfo.version.
+    mcp = MCPServer(name="zsnoop-mcp", instructions=INSTRUCTIONS, version=__version__)
+    tool = _tool_registrar(mcp)
 
     def _validate_host(host: str) -> None:
         try:
@@ -308,7 +369,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         except TransportError as e:
             raise RuntimeError(f"transport error talking to {host!r}: {e}") from e
 
-    @mcp.tool()
+    @tool
     async def list_hosts() -> dict[str, Any]:
         """List the hosts this server is configured to talk to.
 
@@ -327,22 +388,29 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             ],
         }
 
-    @mcp.tool()
+    @tool
     async def agent_info(host: str) -> dict[str, Any]:
         """Return version, supported methods, and limits of the agent on `host`."""
         return await _call(host, "agent_info")
 
-    @mcp.tool()
+    @tool
     async def list_pools(host: str) -> dict[str, Any]:
         """List ZFS pools visible to the agent on `host`.
 
         Each pool reports ``size``, ``allocated``, ``free`` (bytes), and
         ``health``. Useful when you don't already know what pools exist —
         prefer this over the static ``pools`` field in the host config.
+
+        Space caveat: these are ``zpool list`` figures, i.e. raw vdev
+        capacity. On RAIDZ they *include parity*, so ``free`` overstates
+        what datasets can store; ZFS also holds back slop space (about
+        1/32 of the pool). For usable free space read a dataset's
+        ``avail`` (``list_datasets``), never ``size`` or disk count x disk
+        size.
         """
         return await _call(host, "list_pools")
 
-    @mcp.tool()
+    @tool
     async def pool_status(host: str, pool: str | None = None) -> dict[str, Any]:
         """Parsed ``zpool status`` for one pool or all pools on `host`.
 
@@ -355,12 +423,21 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "pool_status", {"pool": pool} if pool else None)
 
-    @mcp.tool()
+    @tool
     async def list_datasets(host: str) -> dict[str, Any]:
-        """List ZFS filesystems and volumes on `host` (no snapshots)."""
+        """List ZFS filesystems and volumes on `host` (no snapshots).
+
+        Each reports ``used`` and ``avail`` in bytes.
+
+        Space caveat: ``used`` includes the
+        dataset's children and snapshots, so summing ``used`` down a tree
+        double-counts. ``avail`` already allows for parity, slop, quotas and
+        reservations, and child datasets share their parent's pool space:
+        one dataset's ``avail`` is not extra space on top of another's.
+        """
         return await _call(host, "list_datasets")
 
-    @mcp.tool()
+    @tool
     async def dataset_properties(
         host: str,
         dataset: str,
@@ -377,13 +454,23 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         Use this for "why is this dataset behaving like that?" — quota,
         compression ratio, atime, recordsize, mountpoint, encryption,
         canmount, etc. are all here.
+
+        Space caveat: ``referenced``, ``used``, ``logicalused`` and the
+        ``usedby*`` family are different views and do not add up across
+        each other. The only valid decomposition is ``used =
+        usedbydataset + usedbysnapshots + usedbychildren +
+        usedbyrefreservation``. ``usedbysnapshots`` is what destroying
+        *all* of this dataset's snapshots would free; it is usually larger
+        than the sum of the snapshots' individual ``used``. ``used`` and
+        ``referenced`` are allocated bytes after compression;
+        ``logicalused`` / ``logicalreferenced`` are before it.
         """
         params: dict[str, Any] = {"dataset": dataset}
         if properties is not None:
             params["properties"] = properties
         return await _call(host, "dataset_properties", params)
 
-    @mcp.tool()
+    @tool
     async def list_snapshots(
         host: str,
         dataset: str | None = None,
@@ -408,7 +495,15 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         or pass ``max_results``.
 
         For aggregate summary statistics (counts by retention class,
-        biggest gap, total unique bytes), prefer ``snapshot_cadence``.
+        biggest gap, span), prefer ``snapshot_cadence``.
+
+        Space caveat: a snapshot's ``used`` is the space unique to it and
+        is **not additive** — do not sum it to estimate reclaimable space.
+        Blocks shared by two or more snapshots appear in no snapshot's
+        ``used``, so destroying a set frees at least the sum and often
+        more, and destroying one snapshot can raise its neighbours'
+        ``used``. ``refer`` is the data the snapshot can see, mostly
+        shared with the live dataset.
         """
         try:
             after_iso = maybe_to_iso(after)
@@ -426,7 +521,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "list_snapshots", params if params else None)
 
-    @mcp.tool()
+    @tool
     async def snapshot_cadence(host: str, dataset: str | None = None) -> dict[str, Any]:
         """Summary statistics for the snapshot inventory on `host`.
 
@@ -438,10 +533,18 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         to answer "is this dataset being snapshotted as expected?" or
         "what's the retention window?" without doing arithmetic on a
         long ``list_snapshots`` response.
+
+        Space caveat: ``unique_bytes`` (per class) and
+        ``total_unique_bytes`` are sums of per-snapshot ``used``, which is
+        not additive. Each is a lower bound on what destroying those
+        snapshots would free, not an estimate of it. For the true figure
+        across all of one dataset's snapshots, read its
+        ``usedbysnapshots`` via ``dataset_properties``. When ``dataset`` is
+        given the summary also covers its descendants.
         """
         return await _call(host, "snapshot_cadence", {"dataset": dataset} if dataset else None)
 
-    @mcp.tool()
+    @tool
     async def diff_snapshots(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:
         """Return paths that differ between two snapshots of the same dataset.
 
@@ -451,7 +554,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "diff_snapshots", {"snap_a": snap_a, "snap_b": snap_b})
 
-    @mcp.tool()
+    @tool
     async def list_dir(
         host: str,
         snapshot: str,
@@ -470,21 +573,30 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_entries"] = max_entries
         return await _call(host, "list_dir", params)
 
-    @mcp.tool()
+    @tool
     async def size_breakdown(
         host: str,
         snapshot: str,
         path: str,
         max_entries: int | None = None,
     ) -> dict[str, Any]:
-        """Total bytes for a snapshot directory, plus per-immediate-child sizes.
+        """Total apparent size of a snapshot directory, plus per-immediate-child sizes.
 
-        Equivalent to ``du --max-depth=1 --block-size=1`` on the snapshot
-        path. For each immediate child of ``path``, returns the recursive
-        byte total of its subtree. Symlinks are never followed (their own
-        inode size is counted). Use this to answer "how big is X?" and
+        For each immediate child of ``path``, returns the recursive sum of
+        ``st_size`` over its subtree. Symlinks are never followed (their
+        own inode size is counted). Use this to answer "how big is X?" and
         "what's inside X that's taking the space?" in a single call;
         drill down by calling again on a large child.
+
+        Space caveat: this is **apparent size** — what ``ls -l`` or ``du
+        --apparent-size`` would show — not allocated blocks, so it is *not*
+        ``du``'s default and not comparable with a dataset's ``used`` /
+        ``referenced`` (allocated bytes after compression). It overstates
+        disk use for compressible data and sparse files, counts a
+        hard-linked file once per link (``du`` counts it once), and adds
+        each directory's own ``st_size``, which on ZFS is an entry count
+        rather than bytes. It also says nothing about what deleting the
+        files would free: their blocks may be held by other snapshots.
 
         Bounded by ``max_entries`` (default 100,000, hard cap 1,000,000)
         and by a 30s wall-clock budget. On hitting either limit, the
@@ -497,7 +609,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_entries"] = max_entries
         return await _call(host, "size_breakdown", params)
 
-    @mcp.tool()
+    @tool
     async def top_consumers(
         host: str,
         snapshot: str,
@@ -510,14 +622,18 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         Walks the subtree (bounded the same way as ``size_breakdown``)
         and keeps a heap of the *n* largest entries seen — files,
         directories (subtree total), and symlinks (own lstat size).
-        Result is like ``du -ab | sort -rn | head -n``, with paths
-        relative to ``path``.
+        Result is like ``du -ab --apparent-size | sort -rn | head -n``,
+        with paths relative to ``path``.
 
         Use after ``size_breakdown`` once you know *which subtree* is
         big and want to know *which specific files and dirs* inside it
         are responsible. ``n`` defaults to 20 (hard cap 1000);
         ``max_entries`` defaults to 100,000 walked (hard cap 1,000,000)
         and the same 30s wall-clock backstop applies.
+
+        Space caveat: sizes are apparent (``st_size``), with the same
+        limits as ``size_breakdown``: not compressed on-disk usage, hard
+        links counted per link, and not what deleting an entry would free.
         """
         params: dict[str, Any] = {"snapshot": snapshot, "path": path}
         if n is not None:
@@ -526,7 +642,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_entries"] = max_entries
         return await _call(host, "top_consumers", params)
 
-    @mcp.tool()
+    @tool
     async def read_file(
         host: str,
         snapshot: str,
@@ -544,7 +660,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "read_file", params)
 
-    @mcp.tool()
+    @tool
     async def find_files(
         host: str,
         snapshot: str,
@@ -562,7 +678,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "find_files", params)
 
-    @mcp.tool()
+    @tool
     async def content_grep(
         host: str,
         snapshot: str,
@@ -580,7 +696,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "content_grep", params)
 
-    @mcp.tool()
+    @tool
     async def file_history(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Walk every snapshot of `dataset` and report the version of `path` in each.
 
@@ -591,7 +707,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "file_history", {"dataset": dataset, "path": path})
 
-    @mcp.tool()
+    @tool
     async def versions_of(
         host: str,
         dataset: str,
@@ -617,7 +733,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "versions_of", params)
 
-    @mcp.tool()
+    @tool
     async def file_diff(
         host: str,
         snap_a: str,
@@ -640,7 +756,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "file_diff", params)
 
-    @mcp.tool()
+    @tool
     async def snapshots_containing(
         host: str,
         dataset: str,
@@ -665,12 +781,12 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             {"dataset": dataset, "path": path, "after": after_iso, "before": before_iso},
         )
 
-    @mcp.tool()
+    @tool
     async def first_appearance(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Return the earliest snapshot of `dataset` in which `path` exists, or null."""
         return await _call(host, "first_appearance", {"dataset": dataset, "path": path})
 
-    @mcp.tool()
+    @tool
     async def last_appearance(host: str, dataset: str, path: str) -> dict[str, Any]:
         """Return the *latest* snapshot of `dataset` in which `path` exists, or null.
 
@@ -679,7 +795,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "last_appearance", {"dataset": dataset, "path": path})
 
-    @mcp.tool()
+    @tool
     async def find_deleted(
         host: str,
         dataset: str,
@@ -712,7 +828,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "find_deleted", params)
 
-    @mcp.tool()
+    @tool
     async def bisect_change(
         host: str,
         dataset: str,
@@ -747,20 +863,27 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_bytes"] = max_bytes
         return await _call(host, "bisect_change", params)
 
-    @mcp.tool()
+    @tool
     async def stale_snapshots(
         host: str,
         older_than: str,
         dataset: str | None = None,
         max_results: int | None = None,
     ) -> dict[str, Any]:
-        """Snapshots older than `older_than`, sorted by unique bytes desc.
+        """Snapshots older than `older_than`, sorted by ``used`` descending.
 
         ``older_than`` accepts ISO 8601 or a phrase like ``"6 months ago"``,
         ``"last year"``. Results are sorted so the biggest-by-``used``
-        appear first — direct input to "what should I cull?". Scoped to
-        ``dataset`` if given, else covers every visible snapshot.
+        appear first, as a starting point for "what should I cull?".
+        Scoped to ``dataset`` if given, else covers every visible snapshot.
         Bounded by ``max_results`` (default 1000, capped at 10 000).
+
+        Space caveat: ``used`` is not reclaimable space. Destroying a set
+        frees at least the sum of its ``used`` and often more (blocks
+        shared only among the destroyed snapshots), and survivors' ``used``
+        can grow afterwards. Only a dry-run ``zfs destroy -nv
+        pool/ds@first%last`` gives the real figure; this server does not
+        run it, so tell the operator to.
         """
         try:
             older_than_iso = maybe_to_iso(older_than)
@@ -775,15 +898,25 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             params["max_results"] = max_results
         return await _call(host, "stale_snapshots", params)
 
-    @mcp.tool()
+    @tool
     async def size_delta(host: str, snap_a: str, snap_b: str) -> dict[str, Any]:
         """Return the bytes written between `snap_a` and `snap_b` of one dataset.
 
-        Both snapshots must belong to the same dataset.
+        Both snapshots must belong to the same dataset, and ``snap_a`` must
+        be the older one (reversed, ZFS reports ``-`` and ``written_bytes``
+        is null). This is ZFS's ``written@<snap_a>`` property of
+        ``snap_b``: the space ``snap_b`` references that was written after
+        ``snap_a``, in allocated bytes after compression.
+
+        Space caveat: it counts new data, not net growth — deletions do not
+        reduce it, so it is not ``refer(snap_b) - refer(snap_a)``, and data
+        written and then overwritten between the two snapshots is not in it.
+        It is not comparable with the apparent sizes from
+        ``size_breakdown``.
         """
         return await _call(host, "size_delta", {"snap_a": snap_a, "snap_b": snap_b})
 
-    @mcp.tool()
+    @tool
     async def checksum_file(host: str, snapshot: str, path: str) -> dict[str, Any]:
         """SHA-256 of the full content of `path` in `snapshot` on `host`.
 
@@ -798,7 +931,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
         """
         return await _call(host, "checksum_file", {"snapshot": snapshot, "path": path})
 
-    @mcp.tool()
+    @tool
     async def fetch_file(
         host: str,
         snapshot: str,
@@ -862,7 +995,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             "queried_at": datetime.now(UTC).isoformat(),
         }
 
-    @mcp.tool()
+    @tool
     async def fetch_dir(
         host: str,
         snapshot: str,
@@ -916,7 +1049,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             "queried_at": datetime.now(UTC).isoformat(),
         }
 
-    @mcp.tool()
+    @tool
     async def restore_file(
         host: str,
         snapshot: str,
@@ -998,7 +1131,7 @@ def create_server(pool: ConnectionPool, config: Config) -> FastMCP:  # noqa: PLR
             },
         )
 
-    @mcp.tool()
+    @tool
     async def restore_dir(
         host: str,
         snapshot: str,

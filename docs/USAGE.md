@@ -156,12 +156,15 @@ by `max_results`.
 > "How much was written between the daily snapshot from last week and today's?"
 
 `size_delta(snap_a=<last week's daily>, snap_b=<today's daily>)`. Useful for
-tracking churn rates on a dataset.
+tracking churn rates on a dataset. It is ZFS's `written@` property: new data
+in allocated bytes, not net growth — deletions don't reduce it.
 
 > "How big is `/home/youruser/Photos` in the latest snapshot, and what's inside it that's eating the space?"
 
 `size_breakdown(host=…, snapshot=<latest-of-the-dataset>, path="Photos")`
-returns the recursive total plus per-immediate-child bytes. Drill down by
+returns the recursive total plus per-immediate-child bytes, as apparent size
+(`du --apparent-size`, not plain `du`; see
+[Space accounting](#space-accounting-what-the-numbers-mean)). Drill down by
 calling it again on whichever child is biggest. Bounded by `max_entries`
 (default 100,000) and a 30 s wall-clock budget — `truncated=true` on the
 response (or `is_truncated=true` on a specific child) tells you which
@@ -177,8 +180,9 @@ down enough and want the actual filenames.
 > "Which snapshots on `rpool/home/youruser` are older than six months — and which are biggest?"
 
 `stale_snapshots(host=…, dataset="rpool/home/youruser", older_than="6 months ago")`
-returns the matching snapshots sorted by unique-`used` bytes descending,
-so the top of the list is the best place to start culling.
+returns the matching snapshots sorted by `used` descending, so the top of
+the list is a place to start looking. `used` is not what deleting them would
+free: run `zfs destroy -nv pool/ds@first%last` on the host for that.
 
 > "When did `/etc/foo.conf` first contain the string `BAD_HEADER`?"
 
@@ -233,9 +237,31 @@ property's value and source (`local`, `inherited from rpool`, `default`,
 `snapshot_cadence(host="r2d2", dataset="rpool/home/youruser")` summarises
 the snapshot inventory: counts bucketed by retention class (frequent /
 hourly / daily / weekly / monthly / other), earliest/latest creation,
-biggest gap (with the two snapshot names that frame it), and total
-unique bytes. Faster than walking `list_snapshots` and doing arithmetic
-on a long response.
+biggest gap (with the two snapshot names that frame it), and summed
+per-snapshot `used` (a lower bound on what the snapshots hold, not a
+reclaim estimate). Faster than walking `list_snapshots` and doing
+arithmetic on a long response.
+
+## Space accounting: what the numbers mean
+
+Every size is raw bytes; GiB is bytes ÷ 1024³, not ÷ 1000³. The numbers come
+from different ZFS lenses and do not combine by simple arithmetic. The same
+caveats are in the server instructions and each tool's description, so the
+LLM sees them at the point of use.
+
+| Number | Source | What it is | Trap |
+| --- | --- | --- | --- |
+| snapshot `used` | `list_snapshots`, `stale_snapshots` | space unique to that one snapshot | **Not additive.** Blocks shared by two or more snapshots are in no snapshot's `used`, so deleting a set frees at least the sum and often more, and deleting one can raise a neighbour's `used`. |
+| `unique_bytes`, `total_unique_bytes` | `snapshot_cadence` | sum of per-snapshot `used` | A lower bound, not a reclaim estimate. For all of one dataset's snapshots, use its `usedbysnapshots`. |
+| `used`, `referenced`, `usedby*` | `dataset_properties`, `list_datasets` | allocated bytes, after compression | Only `used = usedbydataset + usedbysnapshots + usedbychildren + usedbyrefreservation` adds up. `used` includes children, so summing it down a tree double-counts. |
+| `logicalused`, `logicalreferenced` | `dataset_properties` | bytes before compression | Compare these, not `used`, with file sizes. |
+| `bytes`, `total_bytes` | `size_breakdown`, `top_consumers` | apparent size (`st_size`), like `du --apparent-size` | Not on-disk usage: compression and sparse files are invisible, hard links count once per link, a directory adds its own `st_size` (an entry count on ZFS). Not what deleting the files would free either, since other snapshots may hold the blocks. |
+| `written_bytes` | `size_delta` | `written@snap_a` of `snap_b`: allocated bytes written after `snap_a` | New data, not net growth; deletions don't reduce it. |
+| pool `size`, `allocated`, `free` | `list_pools` | raw vdev capacity (`zpool list`) | On RAIDZ this includes parity, and ZFS keeps about 1/32 back as slop. Usable free space is a dataset's `avail`; never derive it from disk count × disk size. |
+
+The only reliable answer to "how much would deleting these snapshots free?"
+is a dry run on the host: `zfs destroy -nv pool/ds@first%last`. zsnoop does
+not run `zfs destroy` in any form.
 
 ## Cross-cutting tips for the LLM
 
