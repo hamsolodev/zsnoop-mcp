@@ -1,0 +1,35 @@
+#!/bin/sh
+# uv-sync-locked [--directory DIR] [UV-EXPORT-OPTIONS...]
+#
+# What `uv sync --locked UV-EXPORT-OPTIONS` installs, with every file downloaded
+# through the LAN's PyPI cache (swarm-stacks#27). `uv sync` fetches each locked
+# file from the URL uv.lock records, files.pythonhosted.org, whatever index is
+# configured, so it never touches the cache. This exports the lock instead,
+# checking it is current exactly as --locked does, installs those files by hash
+# from the configured indexes, then installs the project itself, editable, as
+# `uv sync` does. Every file is checked against uv.lock's sha256.
+#
+# The cache is the runners' UV_INDEX (swarm-stacks stacks/gitea-runners): uv
+# asks it first and keeps pypi.org as the default, so uv.lock stays valid.
+# Without it, the same files come from pypi.org, with the same hashes.
+#
+# Later `uv run` steps must use this environment as it is: the workflow sets
+# UV_NO_SYNC=1, or a `uv run` would sync again from the lock's URLs.
+set -eu
+
+if [ "${1:-}" = "--directory" ]; then
+    cd "$2"
+    shift 2
+fi
+
+req=$(mktemp)
+trap 'rm -f "$req" "$req.pinned"' EXIT
+
+uv export --locked --format requirements-txt --no-header --quiet "$@" -o "$req"
+grep -v '^-e ' "$req" > "$req.pinned" || true
+uv venv --quiet --allow-existing
+uv pip sync --quiet --require-hashes "$req.pinned"
+grep '^-e ' "$req" | while read -r _ path; do
+    uv pip install --quiet --no-deps --editable "$path"
+done
+echo "uv-sync-locked: $(grep -c '^[A-Za-z0-9]' "$req.pinned" || true) locked packages by hash, $(grep -c '^-e ' "$req" || true) editable, in $(pwd)"
