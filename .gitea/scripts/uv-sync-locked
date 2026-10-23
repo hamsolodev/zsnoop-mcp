@@ -1,20 +1,26 @@
 #!/bin/sh
-# uv-sync-locked [--directory DIR] [UV-EXPORT-OPTIONS...]
+# uv-sync-locked [--directory DIR] [UV-SYNC-OPTIONS...]
 #
-# What `uv sync --locked UV-EXPORT-OPTIONS` installs, with every file downloaded
+# What `uv sync --locked UV-SYNC-OPTIONS` installs, with every file downloaded
 # through the LAN's PyPI cache (swarm-stacks#27). `uv sync` fetches each locked
 # file from the URL uv.lock records, files.pythonhosted.org, whatever index is
 # configured, so it never touches the cache. This exports the lock instead,
-# checking it is current exactly as --locked does, installs those files by hash
-# from the configured indexes, then installs the project itself, editable, as
-# `uv sync` does. Every file is checked against uv.lock's sha256.
+# checking it is current exactly as --locked does, and installs those files by
+# hash from the configured indexes; every file is checked against uv.lock's
+# sha256. Then the project and any workspace members it needs, editable unless
+# --no-editable, which also fetches their build backend through the cache. Last,
+# `uv sync --locked --offline` itself: everything third-party is already
+# installed, so it installs only the local packages, exactly as uv sync does,
+# and offline it cannot fetch anything from the lock's URLs.
 #
-# The cache is the runners' UV_INDEX (swarm-stacks stacks/gitea-runners): uv
-# asks it first and keeps pypi.org as the default, so uv.lock stays valid.
-# Without it, the same files come from pypi.org, with the same hashes.
+# The cache is UV_INDEX: the runners set it (swarm-stacks stacks/gitea-runners),
+# and the build broker passes it to image builds as a build argument. uv asks it
+# first and keeps pypi.org as the default, so uv.lock stays valid. Without it,
+# the same files come from pypi.org, with the same hashes.
 #
-# Later `uv run` steps must use this environment as it is: the workflow sets
-# UV_NO_SYNC=1, or a `uv run` would sync again from the lock's URLs.
+# The environment is UV_PROJECT_ENVIRONMENT, else .venv, as for `uv sync`. Later
+# `uv run` steps must use it as it is: the workflows set UV_NO_SYNC=1, or a
+# `uv run` would sync again from the lock's URLs.
 set -eu
 
 if [ "${1:-}" = "--directory" ]; then
@@ -22,14 +28,30 @@ if [ "${1:-}" = "--directory" ]; then
     shift 2
 fi
 
+# --no-editable is an install mode, not an export option: an exported local
+# package without -e has no hash, which --require-hashes refuses.
+editable=--editable
+noedit=
+for arg do
+    shift
+    if [ "$arg" = "--no-editable" ]; then
+        editable=
+        noedit=--no-editable
+    else
+        set -- "$@" "$arg"
+    fi
+done
+
+venv=${UV_PROJECT_ENVIRONMENT:-.venv}
 req=$(mktemp)
 trap 'rm -f "$req" "$req.pinned"' EXIT
 
 uv export --locked --format requirements-txt --no-header --quiet "$@" -o "$req"
 grep -v '^-e ' "$req" > "$req.pinned" || true
-uv venv --quiet --allow-existing
-uv pip sync --quiet --require-hashes "$req.pinned"
+uv venv --quiet --allow-existing "$venv"
+uv pip sync --quiet --python "$venv" --require-hashes "$req.pinned"
 grep '^-e ' "$req" | while read -r _ path; do
-    uv pip install --quiet --no-deps --editable "$path"
+    uv pip install --quiet --python "$venv" --no-deps $editable "$path"
 done
-echo "uv-sync-locked: $(grep -c '^[A-Za-z0-9]' "$req.pinned" || true) locked packages by hash, $(grep -c '^-e ' "$req" || true) editable, in $(pwd)"
+uv sync --locked --offline --quiet $noedit "$@"
+echo "uv-sync-locked: $(grep -c '^[A-Za-z0-9]' "$req.pinned" || true) locked packages by hash, $(grep -c '^-e ' "$req" || true) local, in $venv; uv sync finished it offline"
