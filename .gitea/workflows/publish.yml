@@ -19,6 +19,10 @@ env:
   # See the matching note in test.yml: reflinks fail with EAGAIN on the
   # ZFS-backed runners, so make uv copy rather than clone/hardlink.
   UV_LINK_MODE: copy
+  # .gitea/scripts/uv-sync-locked installs the environment through the LAN's
+  # PyPI cache (swarm-stacks#27). `uv run` must use it as it is: a sync would
+  # fetch every locked file again, from the URLs uv.lock records.
+  UV_NO_SYNC: "1"
 
 jobs:
   publish:
@@ -36,7 +40,7 @@ jobs:
 
       - name: Test the package
         run: |
-          uv sync --group dev
+          .gitea/scripts/uv-sync-locked --group dev
           uv run pytest -q
 
       - name: Build the wheel

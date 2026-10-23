@@ -16,6 +16,10 @@ env:
   # with "Failed to clone ... (os error 11)". Plain copies avoid reflinks and
   # hardlinks entirely; uv itself recommends this setting for such layouts.
   UV_LINK_MODE: copy
+  # .gitea/scripts/uv-sync-locked installs the environment through the LAN's
+  # PyPI cache (swarm-stacks#27). `uv run` must use it as it is: a sync would
+  # fetch every locked file again, from the URLs uv.lock records.
+  UV_NO_SYNC: "1"
 
 jobs:
   lint-test:
@@ -31,7 +35,7 @@ jobs:
           enable-cache: false  # no cache service on self-hosted runners (see swarm-stacks#27)
 
       - name: Sync dev dependencies
-        run: uv sync --group dev
+        run: .gitea/scripts/uv-sync-locked --group dev
 
       - name: Confirm Python version used by uv
         # Belt-and-braces: print the active Python so future
@@ -65,7 +69,7 @@ jobs:
           enable-cache: false  # no cache service on self-hosted runners (see swarm-stacks#27)
 
       - name: Sync docs dependencies
-        run: uv sync --group docs
+        run: .gitea/scripts/uv-sync-locked --group docs
 
       - name: mkdocs build --strict
         run: uv run mkdocs build --strict
