@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/hamsolodev/zsnoop-mcp/main/branding/icon.svg" alt="zsnoop-mcp logo" width="96" align="right">
+
 # zsnoop-mcp
 
 [![PyPI](https://img.shields.io/pypi/v/zsnoop-mcp.svg)](https://pypi.org/project/zsnoop-mcp/)

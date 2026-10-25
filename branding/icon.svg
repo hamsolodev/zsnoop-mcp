@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- zsnoop-mcp: stacked snapshot layers under a magnifying glass, under the tropism sun, on a light tile. -->
+  <rect id="tile" width="64" height="64" rx="14" fill="#f6f7f9"/>
+  <g id="mark">
+    <circle cx="32" cy="18" r="6.5" fill="#e09b12"/>
+    <path d="M32 7 V4 M43 18 h3 M18 18 h3 M40 10 l2 -2 M24 10 l-2 -2" stroke="#e09b12" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M15 44 L28 50 L41 44" fill="none" stroke="#1f5f8b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M15 38.5 L28 44.5 L41 38.5" fill="none" stroke="#1f5f8b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M28 27 L41 33 L28 39 L15 33 Z" fill="#ffffff" stroke="#1f5f8b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="42" cy="44" r="6.2" fill="#ffffff" stroke="#1f5f8b" stroke-width="1.8"/>
+    <path d="M46.4 48.4 L51 53" fill="none" stroke="#1f5f8b" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
